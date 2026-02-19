@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Get version from tag
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+
+      - name: Check workspace crate versions
+        run: |
+          WORKSPACE_PACKAGES=$(cargo metadata --no-deps --format-version 1 | jq -r '
+            .workspace_members as $members
+            | .packages[]
+            | select(.id as $id | $members | index($id))
+            | "\(.name)=\(.version)"
+          ')
+
+          echo "Tag version: ${VERSION}"
+          echo "Workspace packages:"
+          echo "$WORKSPACE_PACKAGES"
+
+          while IFS='=' read -r NAME PKG_VERSION; do
+            if [ -z "$NAME" ]; then
+              continue
+            fi
+
+            if [ "$PKG_VERSION" != "$VERSION" ]; then
+              echo "Error: package '$NAME' version ($PKG_VERSION) does not match tag version ($VERSION)"
+              exit 1
+            fi
+          done <<< "$WORKSPACE_PACKAGES"
+
+      - name: Generate Changelog
+        uses: orhun/git-cliff-action@v4
+        id: git-cliff
+        with:
+          config: cliff.toml
+          args: --verbose --latest --strip header
+        env:
+          OUTPUT: CHANGELOG.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.git-cliff.outputs.content }}
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+
+      - name: Check publish readiness
+        id: publish-ready
+        run: |
+          if cargo publish --workspace --dry-run --locked; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Workspace is not publish-ready yet; skipping crates.io publish."
+          fi
+
+      - name: Publish to crates.io
+        if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' && steps.publish-ready.outputs.ready == 'true' }}
+        run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
