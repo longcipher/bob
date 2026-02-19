@@ -20,6 +20,7 @@ rmcp = { version = "0.16", features = [
     "transport-child-process",
     "transport-streamable-http-client",
 ] }
+scc = "3"
 serde = "1.0.228"
 serde_json = "1"
 thiserror = "2.0.18"

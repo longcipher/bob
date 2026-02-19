@@ -3,6 +3,11 @@
 //! Orchestration layer: scheduler, turn loop, and public `AgentRuntime` trait.
 //! Depends only on `bob-core` port traits — never on concrete adapters.
 
+pub mod action;
+pub mod composite;
+pub mod prompt;
+pub mod scheduler;
+
 use std::sync::Arc;
 
 pub use bob_core as core;
@@ -10,8 +15,7 @@ use bob_core::{
     error::AgentError,
     ports::{EventSink, LlmPort, SessionStore, ToolPort},
     types::{
-        AgentEventStream, AgentRequest, AgentResponse, AgentRunResult, FinishReason, HealthStatus,
-        RuntimeHealth, TokenUsage,
+        AgentEventStream, AgentRequest, AgentRunResult, HealthStatus, RuntimeHealth, TurnPolicy,
     },
 };
 
@@ -61,6 +65,8 @@ pub struct DefaultAgentRuntime {
     pub tools: Arc<dyn ToolPort>,
     pub store: Arc<dyn SessionStore>,
     pub events: Arc<dyn EventSink>,
+    pub default_model: String,
+    pub policy: TurnPolicy,
 }
 
 impl std::fmt::Debug for DefaultAgentRuntime {
@@ -71,14 +77,17 @@ impl std::fmt::Debug for DefaultAgentRuntime {
 
 #[async_trait::async_trait]
 impl AgentRuntime for DefaultAgentRuntime {
-    async fn run(&self, _req: AgentRequest) -> Result<AgentRunResult, AgentError> {
-        // TODO: implement scheduler turn loop
-        Ok(AgentRunResult::Finished(AgentResponse {
-            content: "not yet implemented".into(),
-            tool_transcript: vec![],
-            usage: TokenUsage::default(),
-            finish_reason: FinishReason::Stop,
-        }))
+    async fn run(&self, req: AgentRequest) -> Result<AgentRunResult, AgentError> {
+        scheduler::run_turn(
+            self.llm.as_ref(),
+            self.tools.as_ref(),
+            self.store.as_ref(),
+            self.events.as_ref(),
+            req,
+            &self.policy,
+            &self.default_model,
+        )
+        .await
     }
 
     async fn run_stream(&self, _req: AgentRequest) -> Result<AgentEventStream, AgentError> {
@@ -112,7 +121,7 @@ mod tests {
     impl LlmPort for StubLlm {
         async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, LlmError> {
             Ok(LlmResponse {
-                content: "stub".into(),
+                content: r#"{"type": "final", "content": "stub response"}"#.into(),
                 usage: TokenUsage::default(),
                 finish_reason: FinishReason::Stop,
             })
@@ -166,6 +175,8 @@ mod tests {
             tools: Arc::new(StubTools),
             store: Arc::new(StubStore),
             events: Arc::new(StubSink { count: Mutex::new(0) }),
+            default_model: "test-model".into(),
+            policy: TurnPolicy::default(),
         });
 
         let req = AgentRequest {
@@ -176,10 +187,11 @@ mod tests {
             cancel_token: None,
         };
 
-        let result = rt.run(req).await.unwrap();
+        let result = rt.run(req).await.unwrap_or_else(|e| panic!("{e}"));
         match result {
             AgentRunResult::Finished(resp) => {
                 assert_eq!(resp.finish_reason, FinishReason::Stop);
+                assert_eq!(resp.content, "stub response");
             }
         }
     }
@@ -191,6 +203,8 @@ mod tests {
             tools: Arc::new(StubTools),
             store: Arc::new(StubStore),
             events: Arc::new(StubSink { count: Mutex::new(0) }),
+            default_model: "test-model".into(),
+            policy: TurnPolicy::default(),
         };
 
         let health = rt.health().await;

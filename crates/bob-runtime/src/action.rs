@@ -1,0 +1,177 @@
+//! Action parser — extracts [`AgentAction`] from raw LLM text output.
+
+use bob_core::types::AgentAction;
+
+// ── Error Type ───────────────────────────────────────────────────────
+
+/// Errors that can occur when parsing an [`AgentAction`] from LLM output.
+#[derive(Debug, thiserror::Error)]
+pub enum ActionParseError {
+    /// The input could not be parsed as valid JSON.
+    #[error("invalid JSON: {0}")]
+    InvalidJson(#[from] serde_json::Error),
+
+    /// A required field is missing from the JSON object.
+    #[error("missing required field: {0}")]
+    MissingField(String),
+
+    /// The `type` field contains an unrecognised variant.
+    #[error("unknown action type: {0}")]
+    UnknownType(String),
+}
+
+// ── Public API ───────────────────────────────────────────────────────
+
+/// Parse a raw LLM text response into an [`AgentAction`].
+///
+/// Handles optional markdown code fences (`` ```json `` / `` ``` ``) and
+/// leading/trailing whitespace.
+pub fn parse_action(content: &str) -> Result<AgentAction, ActionParseError> {
+    let stripped = strip_code_fences(content);
+
+    // First pass: ensure it is valid JSON and is an object.
+    let value: serde_json::Value = serde_json::from_str(stripped)?;
+
+    let obj = value.as_object().ok_or_else(|| ActionParseError::MissingField("type".to_owned()))?;
+
+    // Check for the mandatory `type` discriminator.
+    let type_val = obj
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ActionParseError::MissingField("type".to_owned()))?;
+
+    // Validate that `type` is a known variant before full deserialization so we
+    // can distinguish "unknown type" from other serde errors.
+    const KNOWN_TYPES: &[&str] = &["final", "tool_call", "ask_user"];
+    if !KNOWN_TYPES.contains(&type_val) {
+        return Err(ActionParseError::UnknownType(type_val.to_owned()));
+    }
+
+    // Full deserialization — will surface missing variant-specific fields as
+    // `InvalidJson` via the `From<serde_json::Error>` impl.
+    let action: AgentAction = serde_json::from_value(value)?;
+    Ok(action)
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/// Strip optional markdown code fences and surrounding whitespace.
+fn strip_code_fences(input: &str) -> &str {
+    let trimmed = input.trim();
+    // Handle ```json ... ``` and ``` ... ```
+    let without_opening = trimmed.strip_prefix("```json").or_else(|| trimmed.strip_prefix("```"));
+    match without_opening {
+        Some(rest) => rest.strip_suffix("```").unwrap_or(rest).trim(),
+        None => trimmed,
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    // ── Happy-path: each variant ─────────────────────────────────────
+
+    #[test]
+    fn parse_final_variant() {
+        let input = json!({"type": "final", "content": "Hello!"}).to_string();
+        let action = parse_action(&input).expect("should parse Final");
+        match action {
+            AgentAction::Final { content } => assert_eq!(content, "Hello!"),
+            other => panic!("expected Final, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_call_variant() {
+        let input =
+            json!({"type": "tool_call", "name": "search", "arguments": {"q": "rust"}}).to_string();
+        let action = parse_action(&input).expect("should parse ToolCall");
+        match action {
+            AgentAction::ToolCall { name, arguments } => {
+                assert_eq!(name, "search");
+                assert_eq!(arguments, json!({"q": "rust"}));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ask_user_variant() {
+        let input = json!({"type": "ask_user", "question": "Which file?"}).to_string();
+        let action = parse_action(&input).expect("should parse AskUser");
+        match action {
+            AgentAction::AskUser { question } => assert_eq!(question, "Which file?"),
+            other => panic!("expected AskUser, got {other:?}"),
+        }
+    }
+
+    // ── Error cases ──────────────────────────────────────────────────
+
+    #[test]
+    fn reject_missing_type_field() {
+        let input = json!({"content": "Hello!"}).to_string();
+        let err = parse_action(&input).expect_err("should fail without type");
+        assert!(
+            matches!(err, ActionParseError::MissingField(_)),
+            "expected MissingField, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn reject_unknown_type() {
+        let input = json!({"type": "explode", "payload": 42}).to_string();
+        let err = parse_action(&input).expect_err("should fail with unknown type");
+        assert!(
+            matches!(err, ActionParseError::UnknownType(_)),
+            "expected UnknownType, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn reject_non_json_text() {
+        let err = parse_action("this is not json").expect_err("should fail on plain text");
+        assert!(
+            matches!(err, ActionParseError::InvalidJson(_)),
+            "expected InvalidJson, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn reject_missing_required_field_for_variant() {
+        // ToolCall requires `name` and `arguments`
+        let input = json!({"type": "tool_call", "name": "search"}).to_string();
+        let err = parse_action(&input).expect_err("should fail missing arguments");
+        assert!(
+            matches!(err, ActionParseError::InvalidJson(_) | ActionParseError::MissingField(_)),
+            "expected InvalidJson or MissingField, got {err:?}",
+        );
+    }
+
+    // ── Edge cases ───────────────────────────────────────────────────
+
+    #[test]
+    fn handle_json_code_fence() {
+        let input = format!("```json\n{}\n```", json!({"type": "final", "content": "done"}));
+        let action = parse_action(&input).expect("should strip code fence");
+        assert!(matches!(action, AgentAction::Final { .. }));
+    }
+
+    #[test]
+    fn handle_plain_code_fence() {
+        let input = format!("```\n{}\n```", json!({"type": "ask_user", "question": "yes?"}));
+        let action = parse_action(&input).expect("should strip plain code fence");
+        assert!(matches!(action, AgentAction::AskUser { .. }));
+    }
+
+    #[test]
+    fn handle_extra_whitespace() {
+        let input = format!("  \n\n  {}  \n\n  ", json!({"type": "final", "content": "hi"}));
+        let action = parse_action(&input).expect("should handle whitespace");
+        assert!(matches!(action, AgentAction::Final { .. }));
+    }
+}

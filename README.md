@@ -1,122 +1,71 @@
-# Rust Workspace Template
+# Bob — LLM-Powered Coding Agent
 
-A modern Rust workspace template with Leptos CSR support, comprehensive linting, and best practices.
+Bob is an LLM-powered coding agent built in Rust with a hexagonal (ports & adapters) architecture. It connects to language models via the [`genai`](https://crates.io/crates/genai) crate and to external tools via [MCP](https://modelcontextprotocol.io/) servers using [`rmcp`](https://crates.io/crates/rmcp).
 
-## Features
-
-- **Workspace Layout**: Organized `bin/` and `crates/` structure
-- **Leptos CSR**: Client-side rendered Leptos application template
-- **Comprehensive Linting**: Strict clippy configuration with pedantic lints
-- **Modern Tooling**: cargo-leptos, leptosfmt, taplo, typos, rumdl
-- **Tailwind CSS**: Ready-to-use Tailwind configuration
-
-## Project Structure
+## Architecture
 
 ```text
-rust-workspace-template/
-├── Cargo.toml              # Root workspace manifest
-├── Justfile                # Task runner commands
-├── rust-toolchain.toml     # Rust version and components
-├── .rustfmt.toml           # Rustfmt configuration
-├── leptosfmt.toml          # Leptos formatter configuration
-├── .taplo.toml             # TOML formatter configuration
-├── .typos.toml             # Typo checker configuration
-├── .rumdl.toml             # Markdown linter configuration
-├── bin/
-│   └── leptos-csr-app/     # Leptos CSR application
-│       ├── Cargo.toml
-│       ├── index.html
-│       ├── src/
-│       │   ├── main.rs
-│       │   └── app.rs
-│       ├── style/
-│       │   ├── input.css
-│       │   └── main.css
-│       └── assets/
-└── crates/
-    └── common/             # Shared utilities
-        ├── Cargo.toml
-        └── src/
-            └── lib.rs
+bin/cli-agent        — CLI composition root (config, REPL)
+crates/bob-core      — Domain types and port traits (LlmPort, ToolPort, SessionStore, EventSink)
+crates/bob-runtime   — Scheduler FSM, prompt builder, action parser, CompositeToolPort
+crates/bob-adapters  — Concrete adapter implementations (genai, rmcp, in-memory store, tracing)
 ```
 
-## Prerequisites
+See [docs/design.md](docs/design.md) for the full design document.
 
-Install required tools:
+## Quick Start
+
+### Prerequisites
 
 ```bash
+# Install Rust (nightly for formatting)
+rustup install nightly
+
+# Install dev tools
 just setup
 ```
 
-Or manually:
+### Configuration
 
-```bash
-cargo install cargo-leptos
-cargo install cargo-machete
-cargo install taplo-cli
-cargo install typos-cli
-cargo install leptosfmt
+Create an `agent.toml` in the project root (see the included example):
+
+```toml
+[runtime]
+default_model = "gpt-4o-mini"
+max_steps = 12
+
+# Optional: MCP tool server
+# [mcp]
+# [[mcp.servers]]
+# id = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 ```
 
-## Quick Start
+Set your LLM provider API key as an environment variable (e.g. `OPENAI_API_KEY`).
+
+### Run
+
+```bash
+cargo run --bin cli-agent -- --config agent.toml
+```
+
+The REPL prints `>` when ready. Type a message and press Enter. Use `/quit` to exit.
 
 ### Development
 
 ```bash
-# Start frontend development server with hot reload
-just fe-dev
-
-# Or using cargo-leptos directly
-cargo leptos watch -p leptos-csr-app
-```
-
-### Build
-
-```bash
-# Build entire workspace
-just build
-
-# Build frontend in release mode
-just fe-build
-
-# Build frontend in debug mode
-just fe-build-dev
-```
-
-### Linting
-
-```bash
-# Run all lints
-just lint
-
 # Format code
 just format
 
-# Auto-fix issues
-just fix
-```
+# Run lints (typos, clippy, machete, etc.)
+just lint
 
-### Testing
-
-```bash
-# Run tests
+# Run all tests
 just test
 
-# Run tests with coverage
-just test-coverage
-```
-
-### Maintenance
-
-```bash
-# Clean build artifacts
-just clean
-
-# Install required tools
-just setup
-
-# Serve the built frontend
-just fe-serve
+# Full CI check (lint + test + build)
+just ci
 ```
 
 ## Workspace Configuration
@@ -126,7 +75,7 @@ just fe-serve
 The workspace uses strict clippy lints with the following principles:
 
 1. **Pedantic by default**: Enable all pedantic lints, then allow specific ones that are too noisy
-2. **Panic safety**: Deny `unwrap`, `expect`, and `panic` - use proper error handling
+2. **Panic safety**: Deny `unwrap`, `expect`, and `panic` — use proper error handling
 3. **No debug code**: Deny `dbg!`, `todo!`, and `unimplemented!`
 4. **No stdout in libraries**: Use `tracing` instead of `println!`/`eprintln!`
 
@@ -141,18 +90,6 @@ cargo add <crate> --workspace
 # Add to specific crate
 cargo add <crate> -p <crate-name>
 ```
-
-### Creating New Crates
-
-```bash
-# New binary
-cargo new bin/my-app
-
-# New library
-cargo new --lib crates/my-lib
-```
-
-Then add `[lints] workspace = true` to the new crate's `Cargo.toml`.
 
 ## License
 

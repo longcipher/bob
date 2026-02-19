@@ -6,8 +6,9 @@ edition.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 bob-core = { path = "../bob-core" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

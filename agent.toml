@@ -1,0 +1,37 @@
+# Bob Agent Configuration (v1)
+#
+# Copy this file to your project root and adjust as needed.
+# API keys (e.g. OPENAI_API_KEY) are read from environment variables
+# by the genai crate — they are NOT stored in this file.
+
+[runtime]
+# Model identifier in "provider:model" format.
+# Examples: "openai:gpt-4o-mini", "anthropic:claude-sonnet-4-20250514", "gemini:gemini-2.0-flash"
+default_model = "openai:gpt-4o-mini"
+
+# Maximum scheduler steps per turn (default: 12).
+max_steps = 12
+
+# Turn timeout in milliseconds (default: 90000 = 90s).
+turn_timeout_ms = 90000
+
+# ── LLM Settings (optional, reserved for v2) ────────────────────────
+
+# [llm]
+# retry_max = 2
+# stream_default = false
+
+# ── Policy (optional, reserved for v2) ───────────────────────────────
+
+# [policy]
+# deny_tools = []
+
+# ── MCP Servers (optional) ───────────────────────────────────────────
+# Uncomment and configure to enable tool use via MCP.
+
+# [[mcp.servers]]
+# id = "filesystem"
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+# tool_timeout_ms = 15000

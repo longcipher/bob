@@ -4,14 +4,16 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 bob-adapters = { path = "../../crates/bob-adapters" }
 bob-runtime = { path = "../../crates/bob-runtime" }
 clap = { workspace = true, features = ["derive"] }
 config = { workspace = true }
 eyre = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+genai = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["io-std", "io-util"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [lints]
 workspace = true

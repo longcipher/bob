@@ -8,3 +8,14 @@
 //! - `observe-tracing`: Event sink via `tracing` crate
 
 pub use bob_core as core;
+
+#[cfg(feature = "llm-genai")]
+pub mod llm_genai;
+
+#[cfg(feature = "mcp-rmcp")]
+pub mod mcp_rmcp;
+
+pub mod store_memory;
+
+#[cfg(feature = "observe-tracing")]
+pub mod observe;

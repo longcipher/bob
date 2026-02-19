@@ -897,10 +897,10 @@ All must be true:
 ## 21. Immediate Next Steps
 
 1. ~~Scaffold crates and compile empty trait contracts.~~ ✅ Done (bob-core, bob-runtime, bob-adapters, bin/cli-agent).
-2. Implement scheduler turn loop with mock ports and deterministic transition tests.
-3. Add `genai` adapter and run end-to-end local CLI demo.
-4. Add `rmcp` adapter with contract tests.
-5. Add `agent-skills` loading for system prompt enrichment.
+2. ~~Implement scheduler turn loop with mock ports and deterministic transition tests.~~ ✅ Done (LoopGuard, action parser, prompt builder, 6-state FSM).
+3. ~~Add `genai` adapter and run end-to-end local CLI demo.~~ ✅ Done (GenAiLlmAdapter, CLI REPL with config loading).
+4. ~~Add `rmcp` adapter with contract tests.~~ ✅ Done (McpToolAdapter with stdio transport, CompositeToolPort for multi-server).
+5. Add `agent-skills` loading for system prompt enrichment. (Deferred — no `agent-skills` code in v1.)
 
 ## 22. Reviewer Feedback Disposition
 
