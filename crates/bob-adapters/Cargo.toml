@@ -1,0 +1,26 @@
+[package]
+name = "bob-adapters"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["llm-genai", "mcp-rmcp", "skills", "observe-tracing"]
+llm-genai = ["dep:genai"]
+mcp-rmcp = ["dep:rmcp"]
+observe-tracing = ["dep:tracing"]
+skills = ["dep:agent-skills"]
+store-memory = []
+
+[dependencies]
+async-trait = { workspace = true }
+bob-core = { path = "../bob-core" }
+tokio = { workspace = true }
+
+# Feature-gated
+agent-skills = { workspace = true, optional = true }
+genai = { workspace = true, optional = true }
+rmcp = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[lints]
+workspace = true
