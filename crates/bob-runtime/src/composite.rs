@@ -1,8 +1,43 @@
+//! # Composite Tool Port
+//!
 //! Composite tool port — aggregates multiple [`ToolPort`] implementations.
+//!
+//! ## Overview
 //!
 //! When multiple MCP servers (or other tool sources) are configured, a
 //! `CompositeToolPort` collects tools from all inner ports and routes
 //! `call_tool` requests to the port that owns the tool based on namespace.
+//!
+//! ## Routing Strategy
+//!
+//! Each inner port is identified by a `server_id` (e.g. `"filesystem"`).
+//! Tool IDs are expected to be already namespaced (e.g. `"mcp/filesystem/read_file"`).
+//! Routing uses the first inner port whose tool list contains the requested name.
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use bob_runtime::composite::CompositeToolPort;
+//! use bob_core::ports::ToolPort;
+//! use std::sync::Arc;
+//!
+//! let filesystem_port: Arc<dyn ToolPort> = /* ... */;
+//! let shell_port: Arc<dyn ToolPort> = /* ... */;
+//!
+//! let composite = CompositeToolPort::new(vec![
+//!     ("filesystem".to_string(), filesystem_port),
+//!     ("shell".to_string(), shell_port),
+//! ]);
+//!
+//! // List all tools from all sources
+//! let all_tools = composite.list_tools().await?;
+//!
+//! // Call a tool - automatically routed to the correct port
+//! let result = composite.call_tool(ToolCall {
+//!     name: "mcp/filesystem/read_file".to_string(),
+//!     arguments: json!({"path": "/tmp/test.txt"}),
+//! }).await?;
+//! ```
 
 use std::sync::Arc;
 

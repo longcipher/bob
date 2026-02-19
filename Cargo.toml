@@ -2,7 +2,13 @@
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "TODO"
+repository = "https://github.com/longcipher/bob"
+homepage = "https://github.com/longcipher/bob"
+readme = "README.md"
+authors = ["LongCipher Team"]
+description = "LLM-powered coding agent built in Rust with hexagonal architecture"
+keywords = ["ai", "agent", "llm", "coding", "automation"]
+categories = ["development-tools", "asynchronous", "api-bindings"]
 
 [workspace]
 members = ["bin/*", "crates/*"]

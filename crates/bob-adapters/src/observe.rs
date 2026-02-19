@@ -1,4 +1,50 @@
+//! # Tracing Event Sink
+//!
 //! Tracing event sink — implements [`EventSink`] via the `tracing` crate.
+//!
+//! ## Overview
+//!
+//! This adapter provides structured logging of agent events using the
+//! [`tracing`](https://docs.rs/tracing/latest/tracing/) ecosystem.
+//!
+//! Events are emitted at appropriate log levels:
+//! - `INFO`: Normal operations (turn started, tool calls, LLM calls)
+//! - `WARN`: Tool errors
+//! - `ERROR`: Agent errors
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use bob_adapters::observe::TracingEventSink;
+//! use bob_core::{
+//!     ports::EventSink,
+//!     types::AgentEvent,
+//! };
+//!
+//! // Initialize tracing subscriber (typically done in main)
+//! tracing_subscriber::fmt::init();
+//!
+//! let sink = TracingEventSink::new();
+//!
+//! // Emit events
+//! sink.emit(AgentEvent::TurnStarted {
+//!     session_id: "session-1".to_string(),
+//! });
+//! ```
+//!
+//! ## Output Format
+//!
+//! Events are formatted as structured logs:
+//!
+//! ```text
+//! 2024-01-15T10:30:00Z INFO turn started session_id="session-1"
+//! 2024-01-15T10:30:01Z INFO LLM call started model="openai:gpt-4o-mini"
+//! 2024-01-15T10:30:05Z INFO LLM call completed prompt_tokens=100 completion_tokens=50 total_tokens=150
+//! ```
+//!
+//! ## Feature Flag
+//!
+//! This module is only available when the `observe-tracing` feature is enabled (default).
 
 use bob_core::{ports::EventSink, types::AgentEvent};
 

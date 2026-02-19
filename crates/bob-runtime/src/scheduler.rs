@@ -1,4 +1,43 @@
+//! # Scheduler
+//!
 //! Scheduler: loop guard and 6-state turn FSM.
+//!
+//! ## Overview
+//!
+//! The scheduler is the core orchestration component that manages agent turn execution.
+//! It implements a finite state machine (FSM) with the following states:
+//!
+//! 1. **Start**: Initialize turn, load session
+//! 2. **LLM Call**: Send request to LLM
+//! 3. **Parse Action**: Parse LLM response into structured action
+//! 4. **Execute Tool**: Run tool if action is a tool call
+//! 5. **Update State**: Update session state with results
+//! 6. **Loop/Finish**: Either continue or complete the turn
+//!
+//! ## Loop Guard
+//!
+//! The [`LoopGuard`] ensures turn termination by tracking:
+//! - Number of steps (LLM calls)
+//! - Number of tool calls
+//! - Consecutive errors
+//! - Elapsed time
+//!
+//! If any limit is exceeded, the turn is terminated with an appropriate [`GuardReason`].
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use bob_runtime::scheduler::LoopGuard;
+//! use bob_core::types::TurnPolicy;
+//!
+//! let policy = TurnPolicy::default();
+//! let mut guard = LoopGuard::new(policy);
+//!
+//! while guard.can_continue() {
+//!     guard.record_step();
+//!     // Execute step...
+//! }
+//! ```
 
 use std::sync::Arc;
 

@@ -2,6 +2,15 @@
 name = "bob-adapters"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Adapter implementations for Bob Agent Framework ports"
+keywords = ["agent", "ai", "adapter", "genai", "mcp"]
+categories = ["development-tools", "asynchronous", "api-bindings"]
+readme = "README.md"
+documentation = "https://docs.rs/bob-adapters"
 
 [features]
 default = ["llm-genai", "mcp-rmcp", "skills-agent", "observe-tracing"]

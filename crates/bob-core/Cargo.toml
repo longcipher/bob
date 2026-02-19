@@ -2,6 +2,15 @@
 name = "bob-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Core domain types and port traits for Bob Agent Framework"
+keywords = ["agent", "ai", "llm", "domain", "ports-adapters"]
+categories = ["development-tools", "asynchronous"]
+readme = "README.md"
+documentation = "https://docs.rs/bob-core"
 
 [dependencies]
 async-trait = { workspace = true }

@@ -1,4 +1,36 @@
+//! # Error Types
+//!
 //! Error types for the Bob Agent Framework.
+//!
+//! This module provides comprehensive error handling with:
+//!
+//! - **`AgentError`**: Top-level error enum wrapping all error types
+//! - **`LlmError`**: Errors from LLM providers
+//! - **`ToolError`**: Errors from tool execution
+//! - **`StoreError`**: Errors from session storage
+//!
+//! ## Error Handling Strategy
+//!
+//! All errors use [`thiserror`] for ergonomic error definitions and implement:
+//! - `std::error::Error` for compatibility
+//! - `Display` for user-friendly messages
+//! - `From` for automatic conversion
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use bob_core::error::{AgentError, LlmError};
+//!
+//! fn handle_error(err: AgentError) {
+//!     match err {
+//!         AgentError::Llm(e) => eprintln!("LLM error: {}", e),
+//!         AgentError::Tool(e) => eprintln!("Tool error: {}", e),
+//!         AgentError::Policy(msg) => eprintln!("Policy violation: {}", msg),
+//!         AgentError::Timeout => eprintln!("Operation timed out"),
+//!         _ => eprintln!("Other error: {}", err),
+//!     }
+//! }
+//! ```
 
 /// Top-level agent error.
 #[derive(thiserror::Error, Debug)]

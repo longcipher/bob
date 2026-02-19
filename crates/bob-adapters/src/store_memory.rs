@@ -1,4 +1,51 @@
+//! # In-Memory Session Store
+//!
 //! In-memory session store — implements [`SessionStore`] via `scc::HashMap`.
+//!
+//! ## Overview
+//!
+//! This adapter provides a thread-safe, in-memory session store backed by
+//! [`scc::HashMap`](https://docs.rs/scc/latest/scc/struct.HashMap.html).
+//!
+//! Suitable for:
+//! - Development and testing
+//! - Single-process CLI applications
+//! - Scenarios where persistence across restarts is not required
+//!
+//! Not suitable for:
+//! - Multi-process deployments
+//! - Production environments requiring persistence
+//! - Horizontal scaling
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use bob_adapters::store_memory::InMemorySessionStore;
+//! use bob_core::{
+//!     ports::SessionStore,
+//!     types::{SessionState, Message, Role},
+//! };
+//!
+//! let store = InMemorySessionStore::new();
+//!
+//! // Save a session
+//! let state = SessionState {
+//!     messages: vec![Message {
+//!         role: Role::User,
+//!         content: "Hello".to_string(),
+//!     }],
+//!     ..Default::default()
+//! };
+//! store.save(&"session-1".to_string(), &state).await?;
+//!
+//! // Load the session
+//! let loaded = store.load(&"session-1".to_string()).await?;
+//! ```
+//!
+//! ## Thread Safety
+//!
+//! The store uses `scc::HashMap` which provides lock-free concurrent access,
+//! making it safe to share across multiple threads.
 
 use bob_core::{
     error::StoreError,

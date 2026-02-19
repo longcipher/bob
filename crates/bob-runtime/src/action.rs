@@ -1,4 +1,38 @@
+//! # Action Parser
+//!
 //! Action parser — extracts [`AgentAction`] from raw LLM text output.
+//!
+//! ## Overview
+//!
+//! The parser handles the conversion from raw LLM text output to structured
+//! [`AgentAction`] enum variants. It supports:
+//!
+//! - Plain JSON objects
+//! - JSON wrapped in markdown code fences (`` ```json ``)
+//! - Automatic whitespace trimming
+//!
+//! ## Action Types
+//!
+//! The parser recognizes three action types:
+//!
+//! - **`final`**: Final response to the user
+//! - **`tool_call`**: Request to execute a tool
+//! - **`ask_user`**: Request for user input
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use bob_runtime::action::parse_action;
+//! use bob_core::types::AgentAction;
+//!
+//! let json = r#"{"type": "final", "content": "Hello!"}"#;
+//! let action = parse_action(json)?;
+//!
+//! match action {
+//!     AgentAction::Final { content } => println!("Response: {}", content),
+//!     _ => panic!("Unexpected action type"),
+//! }
+//! ```
 
 use bob_core::types::AgentAction;
 

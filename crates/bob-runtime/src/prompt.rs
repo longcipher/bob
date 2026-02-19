@@ -1,5 +1,32 @@
+//! # Prompt Builder
+//!
 //! Prompt builder — assembles `LlmRequest` from session state, tool
 //! descriptors, and system instructions.
+//!
+//! ## Overview
+//!
+//! The prompt builder constructs the complete LLM request by combining:
+//!
+//! 1. **System instructions**: Core instructions + action schema + tool schemas
+//! 2. **Session history**: Message history (truncated to most recent 50 non-system messages)
+//! 3. **Tool definitions**: Available tools and their schemas
+//!
+//! ## Components
+//!
+//! - **Action Schema**: JSON schema for the action protocol
+//! - **Tool Schema Block**: Formatted list of available tools
+//! - **History Truncation**: Keeps most recent messages to fit context limits
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use bob_runtime::prompt::build_llm_request;
+//! use bob_core::types::{SessionState, ToolDescriptor};
+//!
+//! let session = SessionState::default();
+//! let tools = vec![];
+//! let request = build_llm_request("openai:gpt-4o-mini", &session, &tools, "You are helpful.");
+//! ```
 
 use bob_core::types::{LlmRequest, Message, Role, SessionState, ToolDescriptor};
 

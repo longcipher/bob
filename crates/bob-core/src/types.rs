@@ -1,4 +1,27 @@
+//! # Domain Types
+//!
 //! Domain types for the Bob Agent Framework.
+//!
+//! This module defines all the core data structures used throughout the framework:
+//!
+//! - **Request/Response**: `AgentRequest`, `AgentResponse`, `AgentRunResult`
+//! - **Messages**: `Message`, `Role`, conversation history
+//! - **Tools**: `ToolDescriptor`, `ToolCall`, `ToolResult`, `ToolSource`
+//! - **LLM**: `LlmRequest`, `LlmResponse`, `LlmStream`, `LlmStreamChunk`
+//! - **Session**: `SessionState`, `SessionId`
+//! - **Events**: `AgentEvent`, `AgentEventStream`, `AgentStreamEvent`
+//! - **Usage**: `TokenUsage`, `FinishReason`
+//! - **Policy**: `TurnPolicy`, `GuardReason`
+//! - **Health**: `RuntimeHealth`, `HealthStatus`
+//!
+//! ## Serialization
+//!
+//! All types implement `Serialize` and `Deserialize` where appropriate,
+//! making them suitable for persistence and API boundaries.
+//!
+//! ## Thread Safety
+//!
+//! All types are `Send + Sync` and can be safely shared across threads.
 
 use std::{collections::HashMap, pin::Pin};
 

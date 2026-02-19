@@ -1,4 +1,45 @@
+//! # MCP Tool Adapter
+//!
 //! MCP tool adapter — implements [`ToolPort`] via the `rmcp` crate.
+//!
+//! ## Overview
+//!
+//! This adapter connects to [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
+//! servers and exposes their tools through the [`ToolPort`] interface.
+//!
+//! MCP is a protocol for connecting AI assistants to external tools and data sources.
+//! This adapter uses stdio transport to communicate with MCP servers running as child processes.
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use bob_adapters::mcp_rmcp::McpToolAdapter;
+//!
+//! // Connect to the official filesystem MCP server
+//! let adapter = McpToolAdapter::connect_stdio(
+//!     "filesystem",
+//!     "npx",
+//!     &[
+//!         "-y".to_string(),
+//!         "@modelcontextprotocol/server-filesystem".to_string(),
+//!         "/tmp".to_string(),
+//!     ],
+//!     &[], // environment variables
+//! ).await?;
+//!
+//! // List available tools
+//! let tools = adapter.list_tools().await?;
+//!
+//! // Call a tool
+//! let result = adapter.call_tool(ToolCall {
+//!     name: "mcp/filesystem/read_file".to_string(),
+//!     arguments: json!({"path": "/tmp/test.txt"}),
+//! }).await?;
+//! ```
+//!
+//! ## Feature Flag
+//!
+//! This module is only available when the `mcp-rmcp` feature is enabled (default).
 
 use std::borrow::Cow;
 

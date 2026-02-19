@@ -1,7 +1,73 @@
-//! Bob CLI Agent — composition root
+//! # Bob CLI Agent
 //!
-//! Loads `agent.toml`, wires adapters into [`DefaultAgentRuntime`],
-//! and runs a stdin/stdout REPL loop.
+//! Command-line interface for the [Bob Agent Framework](https://github.com/longcipher/bob).
+//!
+//! ## Overview
+//!
+//! `cli-agent` is a command-line interface for Bob, an LLM-powered coding assistant. It provides:
+//!
+//! - **Interactive REPL**: Chat with the AI agent through a terminal interface
+//! - **Multi-Model Support**: Works with OpenAI, Anthropic, Google, and other LLM providers
+//! - **Tool Integration**: Connect to MCP servers for file operations, shell commands, and more
+//! - **Skill System**: Load and apply predefined skills for specialized tasks
+//!
+//! ## Usage
+//!
+//! ```bash
+//! # Start the agent
+//! cargo run --bin cli-agent -- --config agent.toml
+//!
+//! # Or with a custom config path
+//! cargo run --bin cli-agent -- --config /path/to/config.toml
+//! ```
+//!
+//! ## Configuration
+//!
+//! The agent reads configuration from a TOML file (default: `agent.toml`):
+//!
+//! ```toml
+//! [runtime]
+//! default_model = "openai:gpt-4o-mini"
+//! max_steps = 12
+//!
+//! [mcp]
+//! [[mcp.servers]]
+//! id = "filesystem"
+//! command = "npx"
+//! args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+//! ```
+//!
+//! ## Environment Variables
+//!
+//! Set your LLM provider API key:
+//!
+//! ```bash
+//! export OPENAI_API_KEY="sk-..."
+//! export ANTHROPIC_API_KEY="sk-ant-..."
+//! ```
+//!
+//! ## REPL Commands
+//!
+//! - Type your message and press **Enter** to send
+//! - `/quit` or `/exit` to exit the agent
+//!
+//! ## Architecture
+//!
+//! The CLI agent is the composition root that:
+//! 1. Loads configuration from `agent.toml`
+//! 2. Wires up adapters (LLM, tools, storage, events)
+//! 3. Creates the runtime
+//! 4. Runs the REPL loop
+//!
+//! ## Related Crates
+//!
+//! - [`bob_core`] - Domain types and ports
+//! - [`bob_runtime`] - Runtime orchestration
+//! - [`bob_adapters`] - Adapter implementations
+//!
+//! [`bob_core`]: https://docs.rs/bob-core
+//! [`bob_runtime`]: https://docs.rs/bob-runtime
+//! [`bob_adapters`]: https://docs.rs/bob-adapters
 
 mod config;
 

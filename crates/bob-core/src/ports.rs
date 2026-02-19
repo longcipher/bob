@@ -1,7 +1,56 @@
+//! # Port Traits
+//!
 //! Hexagonal port traits for the Bob Agent Framework.
 //!
 //! These are the 4 v1 boundaries that adapters must implement.
 //! All async traits use `async_trait` for dyn-compatibility.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────┐
+//! │          Runtime / Application          │
+//! └─────────────────────────────────────────┘
+//!                  ↓ uses ports
+//! ┌─────────────────────────────────────────┐
+//! │            Port Traits (this module)    │
+//! │  ┌─────────┐ ┌─────────┐ ┌──────────┐  │
+//! │  │LlmPort  │ │ToolPort │ │Store ... │  │
+//! │  └─────────┘ └─────────┘ └──────────┘  │
+//! └─────────────────────────────────────────┘
+//!                  ↓ implemented by
+//! ┌─────────────────────────────────────────┐
+//! │            Adapters (bob-adapters)      │
+//! └─────────────────────────────────────────┘
+//! ```
+//!
+//! ## Implementing a Port
+//!
+//! To create a custom adapter:
+//!
+//! ```rust,ignore
+//! use bob_core::{
+//!     ports::LlmPort,
+//!     types::{LlmRequest, LlmResponse, LlmStream},
+//!     error::LlmError,
+//! };
+//! use async_trait::async_trait;
+//!
+//! pub struct MyCustomLlm {
+//!     // Your fields here
+//! }
+//!
+//! #[async_trait]
+//! impl LlmPort for MyCustomLlm {
+//!     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+//!         // Your implementation
+//!     }
+//!
+//!     async fn complete_stream(&self, req: LlmRequest) -> Result<LlmStream, LlmError> {
+//!         // Your implementation
+//!     }
+//! }
+//! ```
 
 use crate::{
     error::{LlmError, StoreError, ToolError},

@@ -1,4 +1,44 @@
+//! # GenAi LLM Adapter
+//!
 //! GenAi LLM adapter — implements [`LlmPort`] using the `genai` crate.
+//!
+//! ## Overview
+//!
+//! This adapter provides unified access to multiple LLM providers through the
+//! [`genai`](https://crates.io/crates/genai) crate, supporting:
+//!
+//! - OpenAI (GPT-4, GPT-4o-mini, etc.)
+//! - Anthropic (Claude)
+//! - Google (Gemini)
+//! - Groq
+//! - Cohere
+//! - And more...
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use bob_adapters::llm_genai::GenAiLlmAdapter;
+//! use bob_core::{
+//!     ports::LlmPort,
+//!     types::{LlmRequest, LlmResponse},
+//! };
+//! use genai::Client;
+//!
+//! let client = Client::default();
+//! let adapter = GenAiLlmAdapter::new(client);
+//!
+//! let request = LlmRequest {
+//!     model: "openai:gpt-4o-mini".to_string(),
+//!     messages: vec![],
+//!     tools: vec![],
+//! };
+//!
+//! let response = adapter.complete(request).await?;
+//! ```
+//!
+//! ## Feature Flag
+//!
+//! This module is only available when the `llm-genai` feature is enabled (default).
 
 use bob_core::{
     error::LlmError,

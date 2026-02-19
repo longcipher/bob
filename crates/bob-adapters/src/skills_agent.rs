@@ -1,4 +1,54 @@
+//! # Agent Skills
+//!
 //! Agent-skills loader and prompt composer.
+//!
+//! ## Overview
+//!
+//! This module provides skill loading and composition capabilities using the
+//! [`agent-skills`](https://crates.io/crates/agent-skills) crate.
+//!
+//! Skills are predefined prompts and instructions that can be dynamically
+//! selected and injected into the conversation based on the user's input.
+//!
+//! ## Features
+//!
+//! - Load skills from directories
+//! - Recursive directory scanning
+//! - Skill selection based on user input
+//! - Tool filtering (deny/allow lists)
+//! - Token budget management
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use bob_adapters::skills_agent::{
+//!     SkillPromptComposer,
+//!     SkillSourceConfig,
+//!     SkillSelectionPolicy,
+//! };
+//!
+//! // Load skills from a directory
+//! let sources = vec![SkillSourceConfig {
+//!     path: "./skills".into(),
+//!     recursive: true,
+//! }];
+//!
+//! let composer = SkillPromptComposer::from_sources(&sources, 3)?;
+//!
+//! // Render skills for a user input
+//! let policy = SkillSelectionPolicy::default();
+//! let rendered = composer.render_bundle_for_input_with_policy(
+//!     "review this code",
+//!     &policy,
+//! );
+//!
+//! println!("Selected skills: {:?}", rendered.selected_skill_names);
+//! println!("Prompt: {}", rendered.prompt);
+//! ```
+//!
+//! ## Feature Flag
+//!
+//! This module is only available when the `skills-agent` feature is enabled (default).
 
 use std::{
     fs,

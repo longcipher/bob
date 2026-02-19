@@ -1,7 +1,81 @@
-//! Bob Agent Runtime
+//! # Bob Runtime
 //!
-//! Orchestration layer: scheduler, turn loop, and public `AgentRuntime` trait.
-//! Depends only on `bob-core` port traits — never on concrete adapters.
+//! Runtime orchestration layer for the [Bob Agent Framework](https://github.com/longcipher/bob).
+//!
+//! ## Overview
+//!
+//! This crate provides the orchestration layer that coordinates agent execution:
+//!
+//! - **Scheduler**: Finite state machine for agent turn execution
+//! - **Action Parser**: Parses LLM responses into structured actions
+//! - **Prompt Builder**: Constructs prompts with tool definitions and context
+//! - **Composite Tool Port**: Aggregates multiple tool sources
+//!
+//! This crate depends **only** on [`bob_core`] port traits — never on concrete adapters.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────┐
+//! │         AgentRuntime (trait)            │
+//! ├─────────────────────────────────────────┤
+//! │  ┌──────────┐  ┌──────────┐  ┌───────┐ │
+//! │  │Scheduler │→ │Prompt    │→ │Action │ │
+//! │  │  FSM     │  │Builder   │  │Parser │ │
+//! │  └──────────┘  └──────────┘  └───────┘ │
+//! └─────────────────────────────────────────┘
+//!          ↓ uses ports from bob_core
+//! ```
+//!
+//! ## Example
+//!
+//! ```rust,ignore
+//! use bob_runtime::{DefaultAgentRuntime, AgentRuntime};
+//! use bob_core::{
+//!     ports::{LlmPort, ToolPort, SessionStore, EventSink},
+//!     types::{AgentRequest, TurnPolicy},
+//! };
+//! use std::sync::Arc;
+//!
+//! async fn create_runtime(
+//!     llm: Arc<dyn LlmPort>,
+//!     tools: Arc<dyn ToolPort>,
+//!     store: Arc<dyn SessionStore>,
+//!     events: Arc<dyn EventSink>,
+//! ) -> Arc<dyn AgentRuntime> {
+//!     Arc::new(DefaultAgentRuntime {
+//!         llm,
+//!         tools,
+//!         store,
+//!         events,
+//!         default_model: "openai:gpt-4o-mini".to_string(),
+//!         policy: TurnPolicy::default(),
+//!     })
+//! }
+//! ```
+//!
+//! ## Features
+//!
+//! - **Finite State Machine**: Robust turn execution with state tracking
+//! - **Streaming Support**: Real-time event streaming via `run_stream()`
+//! - **Tool Composition**: Aggregate multiple MCP servers or tool sources
+//! - **Turn Policies**: Configurable limits for steps, timeouts, and retries
+//! - **Health Monitoring**: Built-in health check endpoints
+//!
+//! ## Modules
+//!
+//! - [`scheduler`] - Core FSM implementation for agent execution
+//! - [`action`] - Action types and parser for LLM responses
+//! - [`prompt`] - Prompt construction and tool definition formatting
+//! - [`composite`] - Multi-source tool aggregation
+//!
+//! ## Related Crates
+//!
+//! - [`bob_core`] - Domain types and ports
+//! - [`bob_adapters`] - Concrete implementations
+//!
+//! [`bob_core`]: https://docs.rs/bob-core
+//! [`bob_adapters`]: https://docs.rs/bob-adapters
 
 pub mod action;
 pub mod composite;
