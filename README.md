@@ -1,5 +1,12 @@
 # Bob — LLM-Powered Coding Agent
 
+[![DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/longcipher/bob)
+[![Context7](https://img.shields.io/badge/Website-context7.com-blue)](https://context7.com/longcipher/bob)
+[![crates.io](https://img.shields.io/crates/v/bob-core.svg)](https://crates.io/crates/bob-core)
+[![docs.rs](https://docs.rs/bob-core/badge.svg)](https://docs.rs/bob-core)
+
+![bob](https://socialify.git.ci/longcipher/bob/image?font=Source+Code+Pro&language=1&name=1&owner=1&pattern=Circuit+Board&theme=Auto)
+
 Bob is an LLM-powered coding agent built in Rust with a hexagonal (ports & adapters) architecture. It connects to language models via the [`genai`](https://crates.io/crates/genai) crate and to external tools via [MCP](https://modelcontextprotocol.io/) servers using [`rmcp`](https://crates.io/crates/rmcp).
 
 ## Architecture
