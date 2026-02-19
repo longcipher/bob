@@ -15,6 +15,9 @@ max_steps = 12
 # Turn timeout in milliseconds (default: 90000 = 90s).
 turn_timeout_ms = 90000
 
+# Optional context window used for ratio-based skills budgets.
+# model_context_tokens = 128000
+
 # ── LLM Settings (optional, reserved for v2) ────────────────────────
 
 # [llm]
@@ -25,6 +28,7 @@ turn_timeout_ms = 90000
 
 # [policy]
 # deny_tools = []
+# allow_tools = ["local/read_file"]
 
 # ── MCP Servers (optional) ───────────────────────────────────────────
 # Uncomment and configure to enable tool use via MCP.
@@ -35,3 +39,17 @@ turn_timeout_ms = 90000
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 # tool_timeout_ms = 15000
+
+# ── Skills Sources (optional) ───────────────────────────────────────
+# When configured, Bob loads skill directories and injects selected
+# skill instructions into each turn based on user input.
+
+# [skills]
+# max_selected = 3
+# token_budget_tokens = 1800
+# token_budget_ratio = 0.10
+#
+# [[skills.sources]]
+# type = "directory"
+# path = "./skills"
+# recursive = false

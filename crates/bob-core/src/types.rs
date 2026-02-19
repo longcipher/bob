@@ -167,6 +167,7 @@ pub struct SessionState {
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     TurnStarted { session_id: SessionId },
+    SkillsSelected { skill_names: Vec<String> },
     LlmCallStarted { model: String },
     LlmCallCompleted { usage: TokenUsage },
     ToolCallStarted { name: String },

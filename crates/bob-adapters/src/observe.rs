@@ -20,6 +20,9 @@ impl EventSink for TracingEventSink {
             AgentEvent::TurnStarted { session_id } => {
                 tracing::info!(session_id = %session_id, "turn started");
             }
+            AgentEvent::SkillsSelected { skill_names } => {
+                tracing::info!(count = skill_names.len(), ?skill_names, "skills selected");
+            }
             AgentEvent::LlmCallStarted { model } => {
                 tracing::info!(model = %model, "LLM call started");
             }
@@ -68,6 +71,9 @@ mod tests {
 
         let events = vec![
             AgentEvent::TurnStarted { session_id: "s1".into() },
+            AgentEvent::SkillsSelected {
+                skill_names: vec!["rust-review".into(), "security-audit".into()],
+            },
             AgentEvent::LlmCallStarted { model: "gpt-4o".into() },
             AgentEvent::LlmCallCompleted {
                 usage: TokenUsage { prompt_tokens: 10, completion_tokens: 20 },

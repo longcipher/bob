@@ -10,9 +10,9 @@ pub(crate) struct AgentConfig {
     pub runtime: RuntimeConfig,
     #[expect(dead_code, reason = "reserved for v2 LLM retry/stream config")]
     pub llm: Option<LlmConfig>,
-    #[expect(dead_code, reason = "reserved for v2 deny-list policy")]
     pub policy: Option<PolicyConfig>,
     pub mcp: Option<McpConfig>,
+    pub skills: Option<SkillsConfig>,
 }
 
 /// Core runtime settings.
@@ -24,6 +24,8 @@ pub(crate) struct RuntimeConfig {
     pub max_steps: Option<u32>,
     /// Turn timeout in milliseconds (overrides default 90_000).
     pub turn_timeout_ms: Option<u64>,
+    /// Model context size in tokens for budget ratio calculations.
+    pub model_context_tokens: Option<usize>,
 }
 
 /// LLM-specific settings.
@@ -38,10 +40,11 @@ pub(crate) struct LlmConfig {
 
 /// Behavioural policy overrides.
 #[derive(Debug, Deserialize)]
-#[expect(dead_code, reason = "parsed from TOML, wired in v2")]
 pub(crate) struct PolicyConfig {
     /// Tool names to deny.
     pub deny_tools: Option<Vec<String>>,
+    /// Tool names allowed by runtime policy.
+    pub allow_tools: Option<Vec<String>>,
 }
 
 /// MCP server configuration.
@@ -66,8 +69,25 @@ pub(crate) struct McpServerEntry {
     /// Extra environment variables for the child process.
     pub env: Option<HashMap<String, String>>,
     /// Per-tool call timeout in ms.
-    #[expect(dead_code, reason = "wired into per-call timeout in v2")]
     pub tool_timeout_ms: Option<u64>,
+}
+
+/// Skill loading configuration.
+#[derive(Debug, Deserialize)]
+pub(crate) struct SkillsConfig {
+    pub sources: Vec<SkillSourceEntry>,
+    pub max_selected: Option<usize>,
+    pub token_budget_tokens: Option<usize>,
+    pub token_budget_ratio: Option<f64>,
+}
+
+/// One skills source entry.
+#[derive(Debug, Deserialize)]
+pub(crate) struct SkillSourceEntry {
+    #[serde(rename = "type")]
+    pub source_type: String,
+    pub path: String,
+    pub recursive: Option<bool>,
 }
 
 /// Load configuration from a TOML file at the given path.
@@ -80,6 +100,21 @@ pub(crate) fn load_config(path: &str) -> eyre::Result<AgentConfig> {
         .build()?;
     let cfg: AgentConfig = settings.try_deserialize()?;
     Ok(cfg)
+}
+
+/// Resolve `${VAR_NAME}` placeholders from the current process environment.
+///
+/// Plain strings are returned unchanged. Missing variables are treated as
+/// configuration errors.
+pub(crate) fn resolve_env_placeholders(raw: &str) -> eyre::Result<String> {
+    if let Some(var_name) = raw.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        let value = std::env::var(var_name).map_err(|_| {
+            eyre::eyre!("environment variable '{var_name}' is not set for placeholder '{raw}'")
+        })?;
+        Ok(value)
+    } else {
+        Ok(raw.to_string())
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -120,6 +155,7 @@ stream_default = false
 
 [policy]
 deny_tools = []
+allow_tools = ["local/read_file"]
 
 [[mcp.servers]]
 id = "filesystem"
@@ -127,6 +163,16 @@ transport = "stdio"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 tool_timeout_ms = 15000
+
+[skills]
+max_selected = 2
+token_budget_tokens = 1200
+token_budget_ratio = 0.10
+
+[[skills.sources]]
+type = "directory"
+path = "./skills"
+recursive = false
 "#;
         let cfg: AgentConfig = config::Config::builder()
             .add_source(config::File::from_str(toml_str, config::FileFormat::Toml))
@@ -141,5 +187,63 @@ tool_timeout_ms = 15000
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].id, "filesystem");
         assert_eq!(servers[0].args.len(), 3);
+        assert_eq!(
+            cfg.policy.as_ref().and_then(|p| p.allow_tools.clone()),
+            Some(vec!["local/read_file".to_string()])
+        );
+        assert_eq!(cfg.skills.as_ref().and_then(|s| s.max_selected), Some(2));
+        assert_eq!(cfg.skills.as_ref().and_then(|s| s.token_budget_tokens), Some(1200));
+        assert_eq!(cfg.skills.as_ref().and_then(|s| s.token_budget_ratio), Some(0.10));
+    }
+
+    #[test]
+    fn parse_skills_toml() {
+        let toml_str = r#"
+[runtime]
+default_model = "openai:gpt-4o-mini"
+
+[skills]
+max_selected = 1
+token_budget_tokens = 800
+token_budget_ratio = 0.25
+
+[[skills.sources]]
+type = "directory"
+path = "./skills"
+recursive = true
+"#;
+        let cfg: AgentConfig = config::Config::builder()
+            .add_source(config::File::from_str(toml_str, config::FileFormat::Toml))
+            .build()
+            .and_then(|c| c.try_deserialize())
+            .expect("skills config should parse");
+
+        let skills = cfg.skills.expect("skills config exists");
+        assert_eq!(skills.max_selected, Some(1));
+        assert_eq!(skills.token_budget_tokens, Some(800));
+        assert_eq!(skills.token_budget_ratio, Some(0.25));
+        assert_eq!(skills.sources.len(), 1);
+        assert_eq!(skills.sources[0].source_type, "directory");
+        assert_eq!(skills.sources[0].path, "./skills");
+        assert_eq!(skills.sources[0].recursive, Some(true));
+    }
+
+    #[test]
+    fn interpolate_env_placeholder() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let resolved = resolve_env_placeholders("${HOME}");
+        assert_eq!(resolved.ok(), Some(home));
+    }
+
+    #[test]
+    fn interpolate_plain_string_passthrough() {
+        let resolved = resolve_env_placeholders("plain-value");
+        assert_eq!(resolved.ok().as_deref(), Some("plain-value"));
+    }
+
+    #[test]
+    fn interpolate_missing_env_fails() {
+        let resolved = resolve_env_placeholders("${__BOB_TEST_MISSING_ENV__}");
+        assert!(resolved.is_err(), "missing env placeholder must fail");
     }
 }

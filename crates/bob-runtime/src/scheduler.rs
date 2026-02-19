@@ -1,14 +1,19 @@
 //! Scheduler: loop guard and 6-state turn FSM.
 
+use std::sync::Arc;
+
 use bob_core::{
     error::AgentError,
     ports::{EventSink, LlmPort, SessionStore, ToolPort},
     types::{
-        AgentAction, AgentEvent, AgentRequest, AgentResponse, AgentRunResult, FinishReason,
-        GuardReason, Message, Role, TokenUsage, ToolCall, ToolResult, TurnPolicy,
+        AgentAction, AgentEvent, AgentEventStream, AgentRequest, AgentResponse, AgentRunResult,
+        AgentStreamEvent, FinishReason, GuardReason, Message, Role, TokenUsage, ToolCall,
+        ToolResult, TurnPolicy,
     },
 };
+use futures_util::StreamExt;
 use tokio::time::Instant;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 /// Safety net that guarantees turn termination by tracking steps,
 /// tool calls, consecutive errors, and elapsed time against [`TurnPolicy`] limits.
@@ -90,6 +95,98 @@ You are a helpful AI assistant. \
 Think step by step before answering. \
 When you need external information, use the available tools.";
 
+fn resolve_system_instructions(req: &AgentRequest) -> String {
+    let Some(skills_prompt) = req.metadata.get("skills_prompt").and_then(serde_json::Value::as_str)
+    else {
+        return DEFAULT_SYSTEM_INSTRUCTIONS.to_string();
+    };
+
+    if skills_prompt.trim().is_empty() {
+        DEFAULT_SYSTEM_INSTRUCTIONS.to_string()
+    } else {
+        format!("{DEFAULT_SYSTEM_INSTRUCTIONS}\n\n{skills_prompt}")
+    }
+}
+
+fn resolve_selected_skills(req: &AgentRequest) -> Vec<String> {
+    req.metadata
+        .get("selected_skills")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Default)]
+struct ToolCallPolicy {
+    deny_tools: Vec<String>,
+    allow_tools: Option<Vec<String>>,
+}
+
+fn resolve_tool_call_policy(req: &AgentRequest) -> ToolCallPolicy {
+    let deny_tools = parse_metadata_tool_list(req, "deny_tools").unwrap_or_default();
+    let runtime_allow_tools = parse_metadata_tool_list(req, "allow_tools");
+    let skill_allow_tools = parse_metadata_tool_list(req, "skill_allowed_tools");
+
+    let allow_tools = match (runtime_allow_tools, skill_allow_tools) {
+        (Some(runtime), Some(skill)) => {
+            let mut intersection = runtime
+                .iter()
+                .filter(|rt_tool| skill.iter().any(|skill_tool| tools_match(rt_tool, skill_tool)))
+                .cloned()
+                .collect::<Vec<_>>();
+            intersection.sort();
+            intersection.dedup();
+            Some(intersection)
+        }
+        (Some(runtime), None) => Some(runtime),
+        (None, Some(skill)) => Some(skill),
+        (None, None) => None,
+    };
+
+    ToolCallPolicy { deny_tools, allow_tools }
+}
+
+fn parse_metadata_tool_list(req: &AgentRequest, key: &str) -> Option<Vec<String>> {
+    let raw = req.metadata.get(key).and_then(serde_json::Value::as_array)?;
+    let mut parsed = raw
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .filter(|item| !item.trim().is_empty())
+        .collect::<Vec<_>>();
+    parsed.sort();
+    parsed.dedup();
+    Some(parsed)
+}
+
+fn is_tool_allowed_by_policy(tool: &str, policy: &ToolCallPolicy) -> bool {
+    if policy.deny_tools.iter().any(|deny| tools_match(deny, tool)) {
+        return false;
+    }
+
+    policy
+        .allow_tools
+        .as_ref()
+        .is_none_or(|allow_tools| allow_tools.iter().any(|allow| tools_match(allow, tool)))
+}
+
+fn tools_match(lhs: &str, rhs: &str) -> bool {
+    let lhs_lower = lhs.to_ascii_lowercase();
+    let rhs_lower = rhs.to_ascii_lowercase();
+    lhs_lower == rhs_lower || tool_key(lhs) == tool_key(rhs)
+}
+
+fn tool_key(tool: &str) -> String {
+    let lower = tool.to_ascii_lowercase();
+    lower.split_once('(').map_or_else(|| lower.clone(), |(prefix, _)| prefix.to_string())
+}
+
 // ── Turn Loop FSM ────────────────────────────────────────────────────
 
 /// Execute a single agent turn as a 6-state FSM.
@@ -107,6 +204,9 @@ pub(crate) async fn run_turn(
 ) -> Result<AgentRunResult, AgentError> {
     let model = req.model.as_deref().unwrap_or(default_model);
     let cancel_token = req.cancel_token.clone();
+    let system_instructions = resolve_system_instructions(&req);
+    let selected_skills = resolve_selected_skills(&req);
+    let tool_call_policy = resolve_tool_call_policy(&req);
 
     // ── 1. Start ─────────────────────────────────────────────────
     let mut session = store.load(&req.session_id).await?.unwrap_or_default();
@@ -114,6 +214,9 @@ pub(crate) async fn run_turn(
     let mut guard = LoopGuard::new(policy.clone());
 
     events.emit(AgentEvent::TurnStarted { session_id: req.session_id.clone() });
+    if !selected_skills.is_empty() {
+        events.emit(AgentEvent::SkillsSelected { skill_names: selected_skills });
+    }
 
     session.messages.push(Message { role: Role::User, content: req.input.clone() });
 
@@ -165,7 +268,7 @@ pub(crate) async fn run_turn(
             model,
             &session,
             &tool_descriptors,
-            DEFAULT_SYSTEM_INSTRUCTIONS,
+            &system_instructions,
         );
 
         // ── 3. LlmInfer ─────────────────────────────────────────
@@ -237,31 +340,42 @@ pub(crate) async fn run_turn(
 
                         let tool_call = ToolCall { name: name.clone(), arguments };
 
-                        let tool_result = match tokio::time::timeout(
-                            std::time::Duration::from_millis(policy.tool_timeout_ms),
-                            tools.call_tool(tool_call),
-                        )
-                        .await
-                        {
-                            Ok(Ok(result)) => {
-                                guard.reset_errors();
-                                result
-                            }
-                            Ok(Err(e)) => {
-                                guard.record_error();
-                                ToolResult {
-                                    name: name.clone(),
-                                    output: serde_json::json!({"error": e.to_string()}),
-                                    is_error: true,
+                        let tool_result = if is_tool_allowed_by_policy(&name, &tool_call_policy) {
+                            match tokio::time::timeout(
+                                std::time::Duration::from_millis(policy.tool_timeout_ms),
+                                tools.call_tool(tool_call),
+                            )
+                            .await
+                            {
+                                Ok(Ok(result)) => {
+                                    guard.reset_errors();
+                                    result
+                                }
+                                Ok(Err(e)) => {
+                                    guard.record_error();
+                                    ToolResult {
+                                        name: name.clone(),
+                                        output: serde_json::json!({"error": e.to_string()}),
+                                        is_error: true,
+                                    }
+                                }
+                                Err(_timeout) => {
+                                    guard.record_error();
+                                    ToolResult {
+                                        name: name.clone(),
+                                        output: serde_json::json!({"error": "tool call timed out"}),
+                                        is_error: true,
+                                    }
                                 }
                             }
-                            Err(_timeout) => {
-                                guard.record_error();
-                                ToolResult {
-                                    name: name.clone(),
-                                    output: serde_json::json!({"error": "tool call timed out"}),
-                                    is_error: true,
-                                }
+                        } else {
+                            guard.record_error();
+                            ToolResult {
+                                name: name.clone(),
+                                output: serde_json::json!({
+                                    "error": format!("tool '{name}' denied by policy")
+                                }),
+                                is_error: true,
                             }
                         };
 
@@ -317,7 +431,7 @@ async fn finish_turn(
     session: &bob_core::types::SessionState,
     result: FinishResult<'_>,
 ) -> Result<AgentRunResult, AgentError> {
-    let _ = store.save(session_id, session).await;
+    store.save(session_id, session).await?;
     events.emit(AgentEvent::TurnCompleted { finish_reason: result.finish_reason });
     Ok(AgentRunResult::Finished(AgentResponse {
         content: result.content.to_string(),
@@ -325,6 +439,229 @@ async fn finish_turn(
         usage: result.usage,
         finish_reason: result.finish_reason,
     }))
+}
+
+/// Execute a single turn in streaming mode and return an event stream.
+pub(crate) async fn run_turn_stream(
+    llm: Arc<dyn LlmPort>,
+    tools: Arc<dyn ToolPort>,
+    store: Arc<dyn SessionStore>,
+    events: Arc<dyn EventSink>,
+    req: AgentRequest,
+    policy: TurnPolicy,
+    default_model: String,
+) -> Result<AgentEventStream, AgentError> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentStreamEvent>();
+    let config = StreamRunConfig { policy, default_model };
+
+    tokio::spawn(async move {
+        if let Err(err) = run_turn_stream_inner(llm, tools, store, events, req, &config, &tx).await
+        {
+            let _ = tx.send(AgentStreamEvent::Error { error: err.to_string() });
+        }
+    });
+
+    Ok(Box::pin(UnboundedReceiverStream::new(rx)))
+}
+
+struct StreamRunConfig {
+    policy: TurnPolicy,
+    default_model: String,
+}
+
+async fn run_turn_stream_inner(
+    llm: Arc<dyn LlmPort>,
+    tools: Arc<dyn ToolPort>,
+    store: Arc<dyn SessionStore>,
+    events: Arc<dyn EventSink>,
+    req: AgentRequest,
+    config: &StreamRunConfig,
+    tx: &tokio::sync::mpsc::UnboundedSender<AgentStreamEvent>,
+) -> Result<(), AgentError> {
+    let model = req.model.as_deref().unwrap_or(&config.default_model);
+    let cancel_token = req.cancel_token.clone();
+    let system_instructions = resolve_system_instructions(&req);
+    let selected_skills = resolve_selected_skills(&req);
+    let tool_call_policy = resolve_tool_call_policy(&req);
+
+    let mut session = store.load(&req.session_id).await?.unwrap_or_default();
+    let tool_descriptors = tools.list_tools().await?;
+    let mut guard = LoopGuard::new(config.policy.clone());
+    let mut total_usage = TokenUsage::default();
+    let mut consecutive_parse_failures: u32 = 0;
+    let mut next_call_id: u64 = 0;
+
+    events.emit(AgentEvent::TurnStarted { session_id: req.session_id.clone() });
+    if !selected_skills.is_empty() {
+        events.emit(AgentEvent::SkillsSelected { skill_names: selected_skills });
+    }
+    session.messages.push(Message { role: Role::User, content: req.input.clone() });
+
+    loop {
+        if let Some(ref token) = cancel_token &&
+            token.is_cancelled()
+        {
+            events.emit(AgentEvent::Error { error: "turn cancelled".to_string() });
+            events.emit(AgentEvent::TurnCompleted { finish_reason: FinishReason::Cancelled });
+            store.save(&req.session_id, &session).await?;
+            let _ = tx.send(AgentStreamEvent::Error { error: "turn cancelled".to_string() });
+            let _ = tx.send(AgentStreamEvent::Finished { usage: total_usage.clone() });
+            return Ok(());
+        }
+
+        if !guard.can_continue() {
+            let reason = guard.reason();
+            let msg = format!("Turn stopped: {reason:?}");
+            events.emit(AgentEvent::Error { error: msg.clone() });
+            events.emit(AgentEvent::TurnCompleted { finish_reason: FinishReason::GuardExceeded });
+            store.save(&req.session_id, &session).await?;
+            let _ = tx.send(AgentStreamEvent::Error { error: msg });
+            let _ = tx.send(AgentStreamEvent::Finished { usage: total_usage.clone() });
+            return Ok(());
+        }
+
+        let llm_request = crate::prompt::build_llm_request(
+            model,
+            &session,
+            &tool_descriptors,
+            &system_instructions,
+        );
+        events.emit(AgentEvent::LlmCallStarted { model: model.to_string() });
+
+        let mut assistant_content = String::new();
+        let mut llm_usage = TokenUsage::default();
+        let mut fallback_to_complete = false;
+
+        match llm.complete_stream(llm_request.clone()).await {
+            Ok(mut stream) => {
+                while let Some(item) = stream.next().await {
+                    match item {
+                        Ok(bob_core::types::LlmStreamChunk::TextDelta(delta)) => {
+                            assistant_content.push_str(&delta);
+                            let _ = tx.send(AgentStreamEvent::TextDelta { content: delta });
+                        }
+                        Ok(bob_core::types::LlmStreamChunk::Done { usage }) => {
+                            llm_usage = usage;
+                        }
+                        Err(err) => {
+                            events.emit(AgentEvent::Error { error: err.to_string() });
+                            return Err(AgentError::Llm(err));
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                fallback_to_complete = true;
+                events.emit(AgentEvent::Error { error: err.to_string() });
+            }
+        }
+
+        // Provider may not support streaming — fall back to non-streaming complete.
+        if fallback_to_complete {
+            let llm_response = llm.complete(llm_request).await?;
+            assistant_content = llm_response.content.clone();
+            llm_usage = llm_response.usage;
+            let _ = tx.send(AgentStreamEvent::TextDelta { content: llm_response.content });
+        }
+
+        guard.record_step();
+        total_usage.prompt_tokens += llm_usage.prompt_tokens;
+        total_usage.completion_tokens += llm_usage.completion_tokens;
+        events.emit(AgentEvent::LlmCallCompleted { usage: llm_usage });
+        session
+            .messages
+            .push(Message { role: Role::Assistant, content: assistant_content.clone() });
+
+        if let Ok(action) = crate::action::parse_action(&assistant_content) {
+            consecutive_parse_failures = 0;
+            match action {
+                AgentAction::Final { .. } | AgentAction::AskUser { .. } => {
+                    store.save(&req.session_id, &session).await?;
+                    events.emit(AgentEvent::TurnCompleted { finish_reason: FinishReason::Stop });
+                    let _ = tx.send(AgentStreamEvent::Finished { usage: total_usage.clone() });
+                    return Ok(());
+                }
+                AgentAction::ToolCall { name, arguments } => {
+                    events.emit(AgentEvent::ToolCallStarted { name: name.clone() });
+                    next_call_id += 1;
+                    let call_id = format!("call-{next_call_id}");
+                    let _ = tx.send(AgentStreamEvent::ToolCallStarted {
+                        name: name.clone(),
+                        call_id: call_id.clone(),
+                    });
+
+                    let tool_call = ToolCall { name: name.clone(), arguments };
+                    let tool_result = if is_tool_allowed_by_policy(&name, &tool_call_policy) {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_millis(config.policy.tool_timeout_ms),
+                            tools.call_tool(tool_call),
+                        )
+                        .await
+                        {
+                            Ok(Ok(result)) => {
+                                guard.reset_errors();
+                                result
+                            }
+                            Ok(Err(err)) => {
+                                guard.record_error();
+                                ToolResult {
+                                    name: name.clone(),
+                                    output: serde_json::json!({"error": err.to_string()}),
+                                    is_error: true,
+                                }
+                            }
+                            Err(_) => {
+                                guard.record_error();
+                                ToolResult {
+                                    name: name.clone(),
+                                    output: serde_json::json!({"error": "tool call timed out"}),
+                                    is_error: true,
+                                }
+                            }
+                        }
+                    } else {
+                        guard.record_error();
+                        ToolResult {
+                            name: name.clone(),
+                            output: serde_json::json!({
+                                "error": format!("tool '{name}' denied by policy")
+                            }),
+                            is_error: true,
+                        }
+                    };
+
+                    guard.record_tool_call();
+                    let is_error = tool_result.is_error;
+                    events.emit(AgentEvent::ToolCallCompleted { name: name.clone(), is_error });
+                    let _ = tx.send(AgentStreamEvent::ToolCallCompleted {
+                        call_id,
+                        result: tool_result.clone(),
+                    });
+
+                    let output_str = serde_json::to_string(&tool_result.output).unwrap_or_default();
+                    session.messages.push(Message { role: Role::Tool, content: output_str });
+                }
+            }
+        } else {
+            consecutive_parse_failures += 1;
+            if consecutive_parse_failures >= 2 {
+                store.save(&req.session_id, &session).await?;
+                events.emit(AgentEvent::Error {
+                    error: "LLM produced invalid JSON after re-prompt".to_string(),
+                });
+                return Err(AgentError::Internal(
+                    "LLM produced invalid JSON after re-prompt".into(),
+                ));
+            }
+            session.messages.push(Message {
+                role: Role::User,
+                content: "Your response was not valid JSON. \
+                          Please respond with exactly one JSON object \
+                          matching the required schema."
+                    .into(),
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -411,17 +748,19 @@ mod tests {
 
     use std::{
         collections::{HashMap, VecDeque},
-        sync::Mutex,
+        sync::{Arc, Mutex},
     };
 
     use bob_core::{
         error::{LlmError, StoreError, ToolError},
         ports::{EventSink, LlmPort, SessionStore, ToolPort},
         types::{
-            AgentEvent, AgentRequest, AgentRunResult, CancelToken, LlmRequest, LlmResponse,
-            LlmStream, SessionId, SessionState, ToolCall, ToolDescriptor, ToolResult, ToolSource,
+            AgentEvent, AgentRequest, AgentRunResult, AgentStreamEvent, CancelToken, LlmRequest,
+            LlmResponse, LlmStream, LlmStreamChunk, SessionId, SessionState, ToolCall,
+            ToolDescriptor, ToolResult, ToolSource,
         },
     };
+    use futures_util::StreamExt;
 
     // ── Mock ports ───────────────────────────────────────────────
 
@@ -509,6 +848,21 @@ mod tests {
         }
     }
 
+    struct NoCallToolPort {
+        tools: Vec<ToolDescriptor>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolPort for NoCallToolPort {
+        async fn list_tools(&self) -> Result<Vec<ToolDescriptor>, ToolError> {
+            Ok(self.tools.clone())
+        }
+
+        async fn call_tool(&self, _call: ToolCall) -> Result<ToolResult, ToolError> {
+            panic!("tool call should be blocked by policy before execution");
+        }
+    }
+
     struct MemoryStore {
         data: Mutex<HashMap<SessionId, SessionState>>,
     }
@@ -516,6 +870,19 @@ mod tests {
     impl MemoryStore {
         fn new() -> Self {
             Self { data: Mutex::new(HashMap::new()) }
+        }
+    }
+
+    struct FailingSaveStore;
+
+    #[async_trait::async_trait]
+    impl SessionStore for FailingSaveStore {
+        async fn load(&self, _id: &SessionId) -> Result<Option<SessionState>, StoreError> {
+            Ok(None)
+        }
+
+        async fn save(&self, _id: &SessionId, _state: &SessionState) -> Result<(), StoreError> {
+            Err(StoreError::Backend("simulated save failure".into()))
         }
     }
 
@@ -545,6 +912,10 @@ mod tests {
         fn event_count(&self) -> usize {
             self.events.lock().unwrap_or_else(|p| p.into_inner()).len()
         }
+
+        fn all_events(&self) -> Vec<AgentEvent> {
+            self.events.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        }
     }
 
     impl EventSink for CollectingSink {
@@ -570,6 +941,60 @@ mod tests {
             max_consecutive_errors: 3,
             turn_timeout_ms: 30_000,
             tool_timeout_ms: 5_000,
+        }
+    }
+
+    struct StreamLlm {
+        chunks: Mutex<VecDeque<Result<LlmStreamChunk, LlmError>>>,
+    }
+
+    impl StreamLlm {
+        fn new(chunks: Vec<Result<LlmStreamChunk, LlmError>>) -> Self {
+            Self { chunks: Mutex::new(chunks.into()) }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for StreamLlm {
+        async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, LlmError> {
+            Err(LlmError::Provider("complete() should not be called in stream test".into()))
+        }
+
+        async fn complete_stream(&self, _req: LlmRequest) -> Result<LlmStream, LlmError> {
+            let mut chunks = self.chunks.lock().unwrap_or_else(|p| p.into_inner());
+            let items: Vec<Result<LlmStreamChunk, LlmError>> = chunks.drain(..).collect();
+            Ok(Box::pin(futures_util::stream::iter(items)))
+        }
+    }
+
+    struct InspectingLlm {
+        expected_substring: String,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for InspectingLlm {
+        async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+            let system = req
+                .messages
+                .iter()
+                .find(|m| m.role == Role::System)
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            if !system.contains(&self.expected_substring) {
+                return Err(LlmError::Provider(format!(
+                    "expected system prompt to include '{}', got: {}",
+                    self.expected_substring, system
+                )));
+            }
+            Ok(LlmResponse {
+                content: r#"{"type": "final", "content": "ok"}"#.to_string(),
+                usage: TokenUsage::default(),
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn complete_stream(&self, _req: LlmRequest) -> Result<LlmStream, LlmError> {
+            Err(LlmError::Provider("not used".into()))
         }
     }
 
@@ -823,5 +1248,158 @@ mod tests {
         assert_eq!(resp.content, "Recovered from tool error.");
         assert_eq!(resp.tool_transcript.len(), 1);
         assert!(resp.tool_transcript[0].is_error);
+    }
+
+    #[tokio::test]
+    async fn tc08_save_failure_is_propagated() {
+        let llm = SequentialLlm::from_contents(vec![r#"{"type": "final", "content": "done"}"#]);
+        let tools = MockToolPort::empty();
+        let store = FailingSaveStore;
+        let sink = CollectingSink::new();
+
+        let result = run_turn(
+            &llm,
+            &tools,
+            &store,
+            &sink,
+            make_request("hello"),
+            &generous_policy(),
+            "test-model",
+        )
+        .await;
+
+        assert!(matches!(result, Err(AgentError::Store(_))), "expected Store error to be returned");
+    }
+
+    #[tokio::test]
+    async fn tc09_stream_turn_emits_text_and_finished() {
+        let llm: Arc<dyn LlmPort> = Arc::new(StreamLlm::new(vec![
+            Ok(LlmStreamChunk::TextDelta("{\"type\":\"final\",\"content\":\"he".into())),
+            Ok(LlmStreamChunk::TextDelta("llo\"}".into())),
+            Ok(LlmStreamChunk::Done {
+                usage: TokenUsage { prompt_tokens: 3, completion_tokens: 4 },
+            }),
+        ]));
+        let tools: Arc<dyn ToolPort> = Arc::new(MockToolPort::empty());
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let sink: Arc<dyn EventSink> = Arc::new(CollectingSink::new());
+
+        let mut stream = run_turn_stream(
+            llm,
+            tools,
+            store,
+            sink,
+            make_request("hello"),
+            generous_policy(),
+            "test-model".to_string(),
+        )
+        .await
+        .expect("run_turn_stream should produce a stream");
+
+        let mut saw_text = false;
+        let mut saw_finished = false;
+        while let Some(event) = stream.next().await {
+            match event {
+                AgentStreamEvent::TextDelta { content } => {
+                    saw_text = saw_text || !content.is_empty();
+                }
+                AgentStreamEvent::Finished { usage } => {
+                    saw_finished = true;
+                    assert_eq!(usage.prompt_tokens, 3);
+                    assert_eq!(usage.completion_tokens, 4);
+                }
+                AgentStreamEvent::ToolCallStarted { .. } |
+                AgentStreamEvent::ToolCallCompleted { .. } |
+                AgentStreamEvent::Error { .. } => {}
+            }
+        }
+
+        assert!(saw_text, "expected at least one text delta");
+        assert!(saw_finished, "expected a finished event");
+    }
+
+    #[tokio::test]
+    async fn tc10_skills_prompt_metadata_is_injected() {
+        let llm = InspectingLlm { expected_substring: "Skill: rust-review".to_string() };
+        let tools = MockToolPort::empty();
+        let store = MemoryStore::new();
+        let sink = CollectingSink::new();
+
+        let mut req = make_request("review this code");
+        req.metadata.insert(
+            "skills_prompt".to_string(),
+            serde_json::Value::String("Skill: rust-review\nUse strict checks.".to_string()),
+        );
+
+        let result =
+            run_turn(&llm, &tools, &store, &sink, req, &generous_policy(), "test-model").await;
+
+        assert!(result.is_ok(), "run should succeed when skills prompt is injected");
+    }
+
+    #[tokio::test]
+    async fn tc11_selected_skills_metadata_emits_event() {
+        let llm =
+            SequentialLlm::from_contents(vec![r#"{"type": "final", "content": "looks good"}"#]);
+        let tools = MockToolPort::empty();
+        let store = MemoryStore::new();
+        let sink = CollectingSink::new();
+
+        let mut req = make_request("review code");
+        req.metadata.insert(
+            "selected_skills".to_string(),
+            serde_json::json!(["rust-review", "security-audit"]),
+        );
+
+        let result =
+            run_turn(&llm, &tools, &store, &sink, req, &generous_policy(), "test-model").await;
+        assert!(result.is_ok(), "run should succeed");
+
+        let events = sink.all_events();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::SkillsSelected { skill_names }
+                    if skill_names == &vec!["rust-review".to_string(), "security-audit".to_string()]
+            )),
+            "skills.selected event should be emitted with metadata skill names"
+        );
+    }
+
+    #[tokio::test]
+    async fn tc12_policy_deny_tool_blocks_execution() {
+        let llm = SequentialLlm::from_contents(vec![
+            r#"{"type": "tool_call", "name": "search", "arguments": {"q": "rust"}}"#,
+            r#"{"type": "final", "content": "done"}"#,
+        ]);
+        let tools = NoCallToolPort {
+            tools: vec![ToolDescriptor {
+                id: "search".to_string(),
+                description: "search tool".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+                source: ToolSource::Local,
+            }],
+        };
+        let store = MemoryStore::new();
+        let sink = CollectingSink::new();
+
+        let mut req = make_request("search rust");
+        req.metadata
+            .insert("deny_tools".to_string(), serde_json::json!(["search", "local/shell_exec"]));
+
+        let result =
+            run_turn(&llm, &tools, &store, &sink, req, &generous_policy(), "test-model").await;
+        let resp = match result {
+            Ok(AgentRunResult::Finished(r)) => r,
+            other => panic!("expected finished response, got {other:?}"),
+        };
+
+        assert_eq!(resp.finish_reason, FinishReason::Stop);
+        assert_eq!(resp.tool_transcript.len(), 1);
+        assert!(resp.tool_transcript[0].is_error);
+        assert!(
+            resp.tool_transcript[0].output.to_string().contains("denied"),
+            "tool error should explain policy denial"
+        );
     }
 }

@@ -1,9 +1,8 @@
 ---
 name: pb-refine
-description: "Design & Plan Refinement"
+description: "Use when feedback or a Design Change Request requires incremental updates to design.md and tasks.md."
 ---
 
-````skill
 # pb-refine — Design & Plan Refinement
 
 You are the **pb-refine** agent. Your job is to read user feedback on an existing spec (`design.md` and/or `tasks.md`) and update them accordingly. This closes the gap between one-shot planning and iterative refinement.
@@ -19,12 +18,14 @@ Execute the following steps in order.
 ### Step 1: Resolve Spec Directory & Load Existing Spec
 
 **Resolve `<feature-name>` → `<spec-dir>`:**
+
 1. List all directories under `specs/`.
 2. Find the directory whose name ends with `-<feature-name>` (e.g., `2026-02-15-01-add-websocket-auth` for feature-name `add-websocket-auth`).
 3. If exactly one match is found, use it as `<spec-dir>`. All `specs/<spec-dir>/` paths below refer to this resolved directory.
 4. If multiple matches exist, use the most recent one (latest date prefix).
 5. If no match is found, stop and report:
-   ```
+
+   ```text
    ❌ No spec directory found for feature "<feature-name>" in specs/.
       Run /pb-plan <requirement> first to generate the spec.
    ```
@@ -46,6 +47,7 @@ The user's feedback may include:
 - **General feedback** — "this approach won't work because..." or "we should use X instead of Y".
 
 Categorize the feedback into:
+
 1. **Design changes** — modifications to `design.md`.
 2. **Task changes** — modifications to `tasks.md`.
 3. **Both** — changes that affect design and cascade to tasks.
@@ -91,7 +93,7 @@ After making changes, verify:
 
 ### Step 6: Output Summary
 
-```
+```text
 🔄 Spec refined: specs/<spec-dir>/
 
 Changes to design.md:
@@ -140,5 +142,3 @@ Next steps:
 - **Feedback invalidates completed tasks:** Flag this in the summary as a warning. Do not automatically undo completed tasks.
 - **Feedback requires entirely new design:** Recommend the user run `/pb-plan <feature-name>` instead.
 - **Multiple conflicting feedback items:** Apply them in the order given. Note conflicts in the Revision History.
-
-````

@@ -33,7 +33,7 @@ Execute the following steps in strict order. **You must output your reasoning fo
 3. **Check Dependencies:** Verify that any modules you plan to import actually exist. Check `pyproject.toml`, `package.json`, `Cargo.toml`, or equivalent before importing third-party libraries.
 4. **Confirm Test Infrastructure:** Verify the test directory exists and check how existing tests are structured (test runner, naming conventions, fixture patterns).
 
-> **Why this step is mandatory:** Long-running agents are prone to "path hallucination" — assuming files exist at locations they don't oratethat code has a structure it doesn't. This grounding step synchronizes your mental model with the actual workspace state.
+> **Why this step is mandatory:** Long-running agents are prone to "path hallucination" — assuming files exist at locations they don't or that code has a structure it doesn't. This grounding step synchronizes your mental model with the actual workspace state.
 
 ### 2. TDD Cycle
 
@@ -149,6 +149,3 @@ These rules act as your safety harness — they prevent common failure modes in 
 4. **Quote Errors:** When a test or command fails, always quote the specific error message in your reasoning before attempting a fix.
 5. **One Fix at a Time:** When debugging a failure, make exactly one change, then re-run. Do not stack multiple speculative fixes.
 6. **Path Verification:** Never hardcode or assume file paths. Use `ls`, `find`, or file search to confirm paths before using them.
-
-````text
-```

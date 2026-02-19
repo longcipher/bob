@@ -51,6 +51,7 @@ For each unfinished task, in order:
 
 1. **Extract** the full task block (Context, Steps, Verification).
 2. **Gather context** — read `design.md` and `AGENTS.md`.
+   - Record a pre-task workspace snapshot (`git status --porcelain` + tracked/untracked file lists) for safe rollback.
 3. **Spawn a fresh subagent** with the Implementer Prompt (below), filled in with the task content and project context.
    **Context Hygiene:** Do NOT pass the entire chat history. Pass ONLY:
    - The specific Task Description from `tasks.md`.
@@ -68,9 +69,12 @@ For each unfinished task, in order:
 If a subagent fails:
 
 1. **Analyze the diff:** Run `git diff` to see what the failed agent changed.
-2. **Revert the workspace:** Run `git checkout .` to reset to the last known-good state (Harness Reset).
-3. **Report** the failure — which task, what went wrong, specific error output.
-4. Prompt the user:
+2. **Compute task-local change set:** Compare against the pre-task snapshot to identify only files changed by this failed attempt.
+3. **Safe recovery (file-scoped):**
+   - If pre-task workspace was clean: restore only changed tracked files with `git restore --worktree --staged -- <files>` and remove only newly created files from this task.
+   - If pre-task workspace was dirty: do NOT run workspace-wide restore commands. Report file-level cleanup options and wait for user choice.
+4. **Report** the failure — which task, what went wrong, specific error output.
+5. Prompt the user:
    - **Retry** — new subagent, fresh context, pass previous error as a hint constraint. Maximum 2 retries per task.
    - **Skip** — mark as `⏭️ SKIPPED`, move to next task.
    - **Abort** — stop the build, report progress so far.
@@ -165,6 +169,7 @@ Update `tasks.md` in-place after each task using **precise edits** (target the s
 ### ALWAYS
 
 - Mark completed tasks in `tasks.md` immediately.
+- Capture a pre-task workspace snapshot before spawning subagents.
 - Self-review before submitting each task.
 - Run full test suite after each task.
 - Report failures with retry/skip/abort options.
@@ -182,10 +187,8 @@ Update `tasks.md` in-place after each task using **precise edits** (target the s
 4. **Grounding before action.** Verify workspace state before writing code.
 5. **Self-review catches over-engineering.** Audit before submit.
 6. **State lives on disk.** Checkboxes and code are the only persistent state.
-7. **Fail fast, recover cleanly.** Revert workspace before retry. Each attempt starts from a known-good state.
+7. **Fail fast, recover cleanly.** Use task-local rollback from the pre-task snapshot. Avoid workspace-wide resets in dirty trees.
 8. **Context hygiene.** Pass minimal, relevant context. Summarize — don't dump.
-
----
 
 ---
 

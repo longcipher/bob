@@ -1,6 +1,6 @@
 ---
 name: pb-plan
-description: "Design & Task Planning"
+description: "Use when converting a requirement into a design proposal and executable tasks before coding."
 ---
 
 # pb-plan — Design & Task Planning

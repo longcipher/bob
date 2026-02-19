@@ -1,6 +1,6 @@
 ---
 name: pb-build
-description: "Subagent-Driven Implementation"
+description: "Use when tasks.md is ready and you need sequential TDD implementation with recovery loops."
 ---
 
 # pb-build — Subagent-Driven Implementation
@@ -67,6 +67,7 @@ Extract the full task block from `tasks.md` — including Context, Steps, and Ve
 - Read `specs/<spec-dir>/design.md` for design context.
 - Read `AGENTS.md` (if it exists) for project conventions.
 - Identify files most relevant to this task.
+- Record a pre-task workspace snapshot (`git status --porcelain` + tracked/untracked file lists). This baseline is used for safe recovery if the task fails.
 
 #### 3c. Spawn Subagent
 
@@ -115,14 +116,17 @@ After the subagent succeeds, update `tasks.md`:
 If a subagent fails (tests don't pass, implementation blocked, etc.):
 
 1. **Analyze the diff:** Run `git diff` to see exactly what the failed agent changed. Understanding the attempted approach is essential before retrying.
-2. **Revert the workspace:** Run `git checkout .` to clean the workspace back to the last known-good state. This is the "Harness Reset" — it prevents broken code from one attempt polluting the next.
-3. **Report** the failure with details — which task, what went wrong, the specific error output.
-4. **Prompt the user** to choose:
+2. **Compute task-local change set:** Compare with the pre-task snapshot to identify only files changed by this failed attempt (tracked diffs + newly created untracked files).
+3. **Safe recovery (file-scoped):**
+   - If the pre-task workspace was clean: restore only the task-local changed tracked files with `git restore --worktree --staged -- <files>` and remove only the new files created by this task.
+   - If the pre-task workspace was dirty: **do not run any workspace-wide restore command**. Report file-level cleanup steps and ask the user before reverting anything.
+4. **Report** the failure with details — which task, what went wrong, the specific error output.
+5. **Prompt the user** to choose:
    - **Retry** — Spawn a new subagent with fresh context. Pass the previous failure's error message as a "Constraint" hint (e.g., "Previous attempt failed with 'circular import in auth.py'. Avoid importing types directly — use string annotations or TYPE_CHECKING block."). Maximum 2 retries per task.
    - **Skip** — Mark the task as skipped (`⏭️ SKIPPED`) and continue to the next task.
    - **Abort** — Stop the entire build. Report progress so far.
 
-> **Why revert before retry:** If the failed agent left partially-written code, a new agent may try to build on top of broken foundations. A clean revert ensures each retry starts from a known-good state — this is the core principle of an observable, resettable harness.
+> **Why file-scoped recovery before retry:** Failed attempts can leave broken partial edits, but global resets can wipe unrelated in-progress work. Task-local rollback preserves harness reliability without destroying user state.
 
 #### Design Change Requests (DCR)
 
@@ -223,6 +227,7 @@ While executing, display progress after each task:
 ### ALWAYS
 
 - **ALWAYS** mark completed tasks in `tasks.md` immediately after success.
+- **ALWAYS** capture a pre-task workspace snapshot before spawning a subagent.
 - **ALWAYS** self-review before submitting a task's work.
 - **ALWAYS** run the full test suite after each task to catch regressions.
 - **ALWAYS** report failures clearly with actionable options (retry/skip/abort).
@@ -240,7 +245,7 @@ While executing, display progress after each task:
 4. **Grounding before action.** Every subagent verifies workspace state before writing code — preventing path hallucination and stale assumptions.
 5. **Self-review catches over-engineering.** Every subagent audits its own work before submitting.
 6. **State lives on disk.** `tasks.md` checkboxes and committed code are the only persistent state.
-7. **Fail fast, recover cleanly.** Failures trigger workspace revert (`git checkout .`) before retry — ensuring each attempt starts from a known-good state.
+7. **Fail fast, recover cleanly.** Failures trigger task-local rollback using the pre-task snapshot. Never run workspace-wide reset commands in a dirty tree.
 8. **Context hygiene.** Only pass relevant, minimal context to subagents. Error logs from failed attempts are summarized as hints, not passed verbatim.
 
 ---

@@ -1,6 +1,6 @@
 ---
 name: pb-init
-description: "Project State Initialization"
+description: "Use when onboarding a repo or after major structural changes to regenerate AGENTS.md project context."
 ---
 
 # pb-init — Project Initialization

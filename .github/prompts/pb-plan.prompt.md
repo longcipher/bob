@@ -205,8 +205,6 @@ Please review the design and tasks. When ready, run /pb-build <feature-name> to 
 
 ---
 
----
-
 ## DESIGN TEMPLATE
 
 > Fill this template and write to `specs/<spec-dir>/design.md`.
@@ -356,8 +354,6 @@ Please review the design and tasks. When ready, run /pb-build <feature-name> to 
 
 > Security, backward compatibility, migration, monitoring — if applicable.
 ```
-
----
 
 ---
 

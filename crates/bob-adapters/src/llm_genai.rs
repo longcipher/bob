@@ -3,9 +3,12 @@
 use bob_core::{
     error::LlmError,
     ports::LlmPort,
-    types::{FinishReason, LlmRequest, LlmResponse, LlmStream, Message, Role, TokenUsage},
+    types::{
+        FinishReason, LlmRequest, LlmResponse, LlmStream, LlmStreamChunk, Message, Role, TokenUsage,
+    },
 };
-use genai::chat::{ChatMessage, ChatRequest, ChatResponse};
+use futures_util::StreamExt;
+use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ChatResponse, ChatStreamEvent, Usage};
 
 /// Adapter that delegates LLM inference to `genai::Client`.
 pub struct GenAiLlmAdapter {
@@ -47,9 +50,14 @@ fn to_chat_request(req: &LlmRequest) -> ChatRequest {
 
 /// Extract `TokenUsage` from the genai `ChatResponse`.
 fn extract_usage(resp: &ChatResponse) -> TokenUsage {
+    extract_usage_from_usage(&resp.usage)
+}
+
+/// Extract [`TokenUsage`] from genai [`Usage`].
+fn extract_usage_from_usage(usage: &Usage) -> TokenUsage {
     TokenUsage {
-        prompt_tokens: resp.usage.prompt_tokens.unwrap_or(0).try_into().unwrap_or(0),
-        completion_tokens: resp.usage.completion_tokens.unwrap_or(0).try_into().unwrap_or(0),
+        prompt_tokens: usage.prompt_tokens.unwrap_or(0).try_into().unwrap_or(0),
+        completion_tokens: usage.completion_tokens.unwrap_or(0).try_into().unwrap_or(0),
     }
 }
 
@@ -84,8 +92,43 @@ impl LlmPort for GenAiLlmAdapter {
     }
 
     async fn complete_stream(&self, _req: LlmRequest) -> Result<LlmStream, LlmError> {
-        // Streaming scaffolded but not fully implemented in v1.
-        Err(LlmError::Provider("streaming not yet implemented for GenAi adapter".into()))
+        let model = &_req.model;
+        let chat_req = to_chat_request(&_req);
+        let options = ChatOptions::default().with_capture_usage(true).with_capture_content(true);
+
+        let chat_stream = self
+            .client
+            .exec_chat_stream(model, chat_req, Some(&options))
+            .await
+            .map_err(map_genai_error)?;
+
+        let mapped = chat_stream.stream.filter_map(|event| async move {
+            match event {
+                Ok(ChatStreamEvent::Chunk(chunk)) => {
+                    if chunk.content.is_empty() {
+                        None
+                    } else {
+                        Some(Ok(LlmStreamChunk::TextDelta(chunk.content)))
+                    }
+                }
+                Ok(ChatStreamEvent::End(end)) => {
+                    let usage = end
+                        .captured_usage
+                        .as_ref()
+                        .map_or_else(TokenUsage::default, extract_usage_from_usage);
+                    Some(Ok(LlmStreamChunk::Done { usage }))
+                }
+                Ok(
+                    ChatStreamEvent::Start |
+                    ChatStreamEvent::ReasoningChunk(_) |
+                    ChatStreamEvent::ThoughtSignatureChunk(_) |
+                    ChatStreamEvent::ToolCallChunk(_),
+                ) => None,
+                Err(err) => Some(Err(map_genai_error(err))),
+            }
+        });
+
+        Ok(Box::pin(mapped))
     }
 }
 

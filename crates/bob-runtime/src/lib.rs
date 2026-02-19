@@ -90,9 +90,17 @@ impl AgentRuntime for DefaultAgentRuntime {
         .await
     }
 
-    async fn run_stream(&self, _req: AgentRequest) -> Result<AgentEventStream, AgentError> {
-        // TODO: implement streaming scheduler
-        Err(AgentError::Internal("streaming not yet implemented".into()))
+    async fn run_stream(&self, req: AgentRequest) -> Result<AgentEventStream, AgentError> {
+        scheduler::run_turn_stream(
+            self.llm.clone(),
+            self.tools.clone(),
+            self.store.clone(),
+            self.events.clone(),
+            req,
+            self.policy.clone(),
+            self.default_model.clone(),
+        )
+        .await
     }
 
     async fn health(&self) -> RuntimeHealth {
