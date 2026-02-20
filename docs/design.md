@@ -109,27 +109,27 @@ This keeps your "big unified trait" preference for runtime execution, while avoi
 ### 5.1 External Traits: Bootstrap + Runtime
 
 ```rust
-#[async_trait::async_trait]
 pub trait AgentBootstrap: Send {
-    async fn register_mcp_server(
-        &mut self,
-        cfg: McpServerConfig,
-    ) -> Result<(), AgentError>;
-
     fn build(self) -> Result<std::sync::Arc<dyn AgentRuntime>, AgentError>
     where
         Self: Sized;
 }
 
+pub struct RuntimeBuilder { /* llm/tools/store/events/model/policy */ }
+
+impl RuntimeBuilder {
+    pub fn with_llm(self, llm: Arc<dyn LlmPort>) -> Self;
+    pub fn with_tools(self, tools: Arc<dyn ToolPort>) -> Self;
+    pub fn with_store(self, store: Arc<dyn SessionStore>) -> Self;
+    pub fn with_events(self, events: Arc<dyn EventSink>) -> Self;
+    pub fn with_default_model(self, model: impl Into<String>) -> Self;
+    pub fn with_policy(self, policy: TurnPolicy) -> Self;
+}
+
 #[async_trait::async_trait]
 pub trait AgentRuntime: Send + Sync {
     async fn run(&self, req: AgentRequest) -> Result<AgentRunResult, AgentError>;
-
-    async fn run_stream(
-        &self,
-        req: AgentRequest,
-    ) -> Result<AgentEventStream, AgentError>;
-
+    async fn run_stream(&self, req: AgentRequest) -> Result<AgentEventStream, AgentError>;
     async fn health(&self) -> RuntimeHealth;
 }
 ```
@@ -183,7 +183,7 @@ Reasoning:
 
 Core entities:
 
-- `AgentRequest`: user input, session id, model hint, metadata, deadlines, and optional cancellation handle.
+- `AgentRequest`: user input, session id, model hint, typed request context, and optional cancellation handle.
 - `AgentResponse`: final text, tool transcript, token usage, finish reason.
 - `AgentRunResult`: `Finished`.
 - `SessionState`: message history, memory summary, budget counters.

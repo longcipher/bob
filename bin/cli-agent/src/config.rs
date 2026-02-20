@@ -58,9 +58,9 @@ pub(crate) struct McpConfig {
 pub(crate) struct McpServerEntry {
     /// Logical name used as namespace prefix.
     pub id: String,
-    /// Transport type (only `"stdio"` supported in v1).
-    #[expect(dead_code, reason = "only stdio supported in v1, field reserved")]
-    pub transport: String,
+    /// Transport type (defaults to `stdio`).
+    #[serde(default)]
+    pub transport: McpTransport,
     /// Executable command to spawn.
     pub command: String,
     /// Arguments to pass to the command.
@@ -84,10 +84,25 @@ pub(crate) struct SkillsConfig {
 /// One skills source entry.
 #[derive(Debug, Deserialize)]
 pub(crate) struct SkillSourceEntry {
-    #[serde(rename = "type")]
-    pub source_type: String,
+    #[serde(rename = "type", alias = "source_type")]
+    pub source_type: SkillSourceType,
     pub path: String,
     pub recursive: Option<bool>,
+}
+
+/// Supported MCP transports.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum McpTransport {
+    #[default]
+    Stdio,
+}
+
+/// Supported skill source kinds.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SkillSourceType {
+    Directory,
 }
 
 /// Load configuration from a TOML file at the given path.
@@ -124,7 +139,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_minimal_toml() {
+    fn parse_minimal_toml() -> eyre::Result<()> {
         let toml_str = r#"
 [runtime]
 default_model = "openai:gpt-4o-mini"
@@ -132,17 +147,15 @@ default_model = "openai:gpt-4o-mini"
         let cfg: AgentConfig = config::Config::builder()
             .add_source(config::File::from_str(toml_str, config::FileFormat::Toml))
             .build()
-            .and_then(|c| c.try_deserialize())
-            .ok()
-            .and_then(|c: AgentConfig| Some(c))
-            .unwrap();
+            .and_then(|c| c.try_deserialize())?;
 
         assert_eq!(cfg.runtime.default_model, "openai:gpt-4o-mini");
         assert!(cfg.mcp.is_none());
+        Ok(())
     }
 
     #[test]
-    fn parse_full_toml() {
+    fn parse_full_toml() -> eyre::Result<()> {
         let toml_str = r#"
 [runtime]
 default_model = "openai:gpt-4o-mini"
@@ -177,15 +190,14 @@ recursive = false
         let cfg: AgentConfig = config::Config::builder()
             .add_source(config::File::from_str(toml_str, config::FileFormat::Toml))
             .build()
-            .and_then(|c| c.try_deserialize())
-            .ok()
-            .and_then(|c: AgentConfig| Some(c))
-            .unwrap();
+            .and_then(|c| c.try_deserialize())?;
 
         assert_eq!(cfg.runtime.max_steps, Some(12));
-        let servers = &cfg.mcp.as_ref().unwrap().servers;
+        let mcp = cfg.mcp.as_ref().ok_or_else(|| eyre::eyre!("mcp config should exist"))?;
+        let servers = &mcp.servers;
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].id, "filesystem");
+        assert_eq!(servers[0].transport, McpTransport::Stdio);
         assert_eq!(servers[0].args.len(), 3);
         assert_eq!(
             cfg.policy.as_ref().and_then(|p| p.allow_tools.clone()),
@@ -194,10 +206,11 @@ recursive = false
         assert_eq!(cfg.skills.as_ref().and_then(|s| s.max_selected), Some(2));
         assert_eq!(cfg.skills.as_ref().and_then(|s| s.token_budget_tokens), Some(1200));
         assert_eq!(cfg.skills.as_ref().and_then(|s| s.token_budget_ratio), Some(0.10));
+        Ok(())
     }
 
     #[test]
-    fn parse_skills_toml() {
+    fn parse_skills_toml() -> eyre::Result<()> {
         let toml_str = r#"
 [runtime]
 default_model = "openai:gpt-4o-mini"
@@ -215,17 +228,42 @@ recursive = true
         let cfg: AgentConfig = config::Config::builder()
             .add_source(config::File::from_str(toml_str, config::FileFormat::Toml))
             .build()
-            .and_then(|c| c.try_deserialize())
-            .expect("skills config should parse");
+            .and_then(|c| c.try_deserialize())?;
 
-        let skills = cfg.skills.expect("skills config exists");
+        let skills = cfg.skills.ok_or_else(|| eyre::eyre!("skills config should exist"))?;
         assert_eq!(skills.max_selected, Some(1));
         assert_eq!(skills.token_budget_tokens, Some(800));
         assert_eq!(skills.token_budget_ratio, Some(0.25));
         assert_eq!(skills.sources.len(), 1);
-        assert_eq!(skills.sources[0].source_type, "directory");
+        assert_eq!(skills.sources[0].source_type, SkillSourceType::Directory);
         assert_eq!(skills.sources[0].path, "./skills");
         assert_eq!(skills.sources[0].recursive, Some(true));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_skills_toml_supports_source_type_alias() -> eyre::Result<()> {
+        let toml_str = r#"
+[runtime]
+default_model = "openai:gpt-4o-mini"
+
+[skills]
+max_selected = 1
+
+[[skills.sources]]
+source_type = "directory"
+path = "./skills"
+recursive = false
+"#;
+        let cfg: AgentConfig = config::Config::builder()
+            .add_source(config::File::from_str(toml_str, config::FileFormat::Toml))
+            .build()
+            .and_then(|c| c.try_deserialize())?;
+
+        let skills = cfg.skills.ok_or_else(|| eyre::eyre!("skills config should exist"))?;
+        assert_eq!(skills.sources.len(), 1);
+        assert_eq!(skills.sources[0].source_type, SkillSourceType::Directory);
+        Ok(())
     }
 
     #[test]

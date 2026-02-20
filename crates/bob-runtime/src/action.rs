@@ -30,7 +30,7 @@
 //!
 //! match action {
 //!     AgentAction::Final { content } => println!("Response: {}", content),
-//!     _ => panic!("Unexpected action type"),
+//!     _ => println!("Other action"),
 //! }
 //! ```
 
@@ -113,35 +113,32 @@ mod tests {
     #[test]
     fn parse_final_variant() {
         let input = json!({"type": "final", "content": "Hello!"}).to_string();
-        let action = parse_action(&input).expect("should parse Final");
-        match action {
-            AgentAction::Final { content } => assert_eq!(content, "Hello!"),
-            other => panic!("expected Final, got {other:?}"),
-        }
+        let action = parse_action(&input);
+        assert!(
+            matches!(action.as_ref(), Ok(AgentAction::Final { content }) if content == "Hello!")
+        );
     }
 
     #[test]
     fn parse_tool_call_variant() {
         let input =
             json!({"type": "tool_call", "name": "search", "arguments": {"q": "rust"}}).to_string();
-        let action = parse_action(&input).expect("should parse ToolCall");
-        match action {
-            AgentAction::ToolCall { name, arguments } => {
-                assert_eq!(name, "search");
-                assert_eq!(arguments, json!({"q": "rust"}));
-            }
-            other => panic!("expected ToolCall, got {other:?}"),
-        }
+        let action = parse_action(&input);
+        assert!(matches!(
+            action.as_ref(),
+            Ok(AgentAction::ToolCall { name, arguments })
+                if name == "search" && *arguments == json!({"q": "rust"})
+        ));
     }
 
     #[test]
     fn parse_ask_user_variant() {
         let input = json!({"type": "ask_user", "question": "Which file?"}).to_string();
-        let action = parse_action(&input).expect("should parse AskUser");
-        match action {
-            AgentAction::AskUser { question } => assert_eq!(question, "Which file?"),
-            other => panic!("expected AskUser, got {other:?}"),
-        }
+        let action = parse_action(&input);
+        assert!(matches!(
+            action.as_ref(),
+            Ok(AgentAction::AskUser { question }) if question == "Which file?"
+        ));
     }
 
     // ── Error cases ──────────────────────────────────────────────────
@@ -149,9 +146,9 @@ mod tests {
     #[test]
     fn reject_missing_type_field() {
         let input = json!({"content": "Hello!"}).to_string();
-        let err = parse_action(&input).expect_err("should fail without type");
+        let err = parse_action(&input);
         assert!(
-            matches!(err, ActionParseError::MissingField(_)),
+            matches!(err, Err(ActionParseError::MissingField(_))),
             "expected MissingField, got {err:?}",
         );
     }
@@ -159,18 +156,18 @@ mod tests {
     #[test]
     fn reject_unknown_type() {
         let input = json!({"type": "explode", "payload": 42}).to_string();
-        let err = parse_action(&input).expect_err("should fail with unknown type");
+        let err = parse_action(&input);
         assert!(
-            matches!(err, ActionParseError::UnknownType(_)),
+            matches!(err, Err(ActionParseError::UnknownType(_))),
             "expected UnknownType, got {err:?}",
         );
     }
 
     #[test]
     fn reject_non_json_text() {
-        let err = parse_action("this is not json").expect_err("should fail on plain text");
+        let err = parse_action("this is not json");
         assert!(
-            matches!(err, ActionParseError::InvalidJson(_)),
+            matches!(err, Err(ActionParseError::InvalidJson(_))),
             "expected InvalidJson, got {err:?}",
         );
     }
@@ -179,9 +176,12 @@ mod tests {
     fn reject_missing_required_field_for_variant() {
         // ToolCall requires `name` and `arguments`
         let input = json!({"type": "tool_call", "name": "search"}).to_string();
-        let err = parse_action(&input).expect_err("should fail missing arguments");
+        let err = parse_action(&input);
         assert!(
-            matches!(err, ActionParseError::InvalidJson(_) | ActionParseError::MissingField(_)),
+            matches!(
+                err,
+                Err(ActionParseError::InvalidJson(_) | ActionParseError::MissingField(_))
+            ),
             "expected InvalidJson or MissingField, got {err:?}",
         );
     }
@@ -191,21 +191,21 @@ mod tests {
     #[test]
     fn handle_json_code_fence() {
         let input = format!("```json\n{}\n```", json!({"type": "final", "content": "done"}));
-        let action = parse_action(&input).expect("should strip code fence");
-        assert!(matches!(action, AgentAction::Final { .. }));
+        let action = parse_action(&input);
+        assert!(matches!(action, Ok(AgentAction::Final { .. })));
     }
 
     #[test]
     fn handle_plain_code_fence() {
         let input = format!("```\n{}\n```", json!({"type": "ask_user", "question": "yes?"}));
-        let action = parse_action(&input).expect("should strip plain code fence");
-        assert!(matches!(action, AgentAction::AskUser { .. }));
+        let action = parse_action(&input);
+        assert!(matches!(action, Ok(AgentAction::AskUser { .. })));
     }
 
     #[test]
     fn handle_extra_whitespace() {
         let input = format!("  \n\n  {}  \n\n  ", json!({"type": "final", "content": "hi"}));
-        let action = parse_action(&input).expect("should handle whitespace");
-        assert!(matches!(action, AgentAction::Final { .. }));
+        let action = parse_action(&input);
+        assert!(matches!(action, Ok(AgentAction::Final { .. })));
     }
 }

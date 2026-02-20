@@ -43,6 +43,7 @@ use std::sync::Arc;
 
 use bob_core::{
     error::AgentError,
+    is_tool_allowed, normalize_tool_list,
     ports::{EventSink, LlmPort, SessionStore, ToolPort},
     types::{
         AgentAction, AgentEvent, AgentEventStream, AgentRequest, AgentResponse, AgentRunResult,
@@ -135,8 +136,7 @@ Think step by step before answering. \
 When you need external information, use the available tools.";
 
 fn resolve_system_instructions(req: &AgentRequest) -> String {
-    let Some(skills_prompt) = req.metadata.get("skills_prompt").and_then(serde_json::Value::as_str)
-    else {
+    let Some(skills_prompt) = req.context.system_prompt.as_deref() else {
         return DEFAULT_SYSTEM_INSTRUCTIONS.to_string();
     };
 
@@ -148,17 +148,7 @@ fn resolve_system_instructions(req: &AgentRequest) -> String {
 }
 
 fn resolve_selected_skills(req: &AgentRequest) -> Vec<String> {
-    req.metadata
-        .get("selected_skills")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
+    req.context.selected_skills.clone()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -168,62 +158,66 @@ struct ToolCallPolicy {
 }
 
 fn resolve_tool_call_policy(req: &AgentRequest) -> ToolCallPolicy {
-    let deny_tools = parse_metadata_tool_list(req, "deny_tools").unwrap_or_default();
-    let runtime_allow_tools = parse_metadata_tool_list(req, "allow_tools");
-    let skill_allow_tools = parse_metadata_tool_list(req, "skill_allowed_tools");
-
-    let allow_tools = match (runtime_allow_tools, skill_allow_tools) {
-        (Some(runtime), Some(skill)) => {
-            let mut intersection = runtime
-                .iter()
-                .filter(|rt_tool| skill.iter().any(|skill_tool| tools_match(rt_tool, skill_tool)))
-                .cloned()
-                .collect::<Vec<_>>();
-            intersection.sort();
-            intersection.dedup();
-            Some(intersection)
-        }
-        (Some(runtime), None) => Some(runtime),
-        (None, Some(skill)) => Some(skill),
-        (None, None) => None,
-    };
-
+    let deny_tools =
+        normalize_tool_list(req.context.tool_policy.deny_tools.iter().map(String::as_str));
+    let allow_tools = req
+        .context
+        .tool_policy
+        .allow_tools
+        .as_ref()
+        .map(|tools| normalize_tool_list(tools.iter().map(String::as_str)));
     ToolCallPolicy { deny_tools, allow_tools }
 }
 
-fn parse_metadata_tool_list(req: &AgentRequest, key: &str) -> Option<Vec<String>> {
-    let raw = req.metadata.get(key).and_then(serde_json::Value::as_array)?;
-    let mut parsed = raw
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .map(ToString::to_string)
-        .filter(|item| !item.trim().is_empty())
-        .collect::<Vec<_>>();
-    parsed.sort();
-    parsed.dedup();
-    Some(parsed)
+fn is_tool_allowed_by_policy(tool: &str, policy: &ToolCallPolicy) -> bool {
+    is_tool_allowed(tool, &policy.deny_tools, policy.allow_tools.as_deref())
 }
 
-fn is_tool_allowed_by_policy(tool: &str, policy: &ToolCallPolicy) -> bool {
-    if policy.deny_tools.iter().any(|deny| tools_match(deny, tool)) {
-        return false;
+async fn execute_tool_call(
+    tools: &dyn ToolPort,
+    guard: &mut LoopGuard,
+    tool_call: ToolCall,
+    policy: &ToolCallPolicy,
+    timeout_ms: u64,
+) -> ToolResult {
+    if !is_tool_allowed_by_policy(&tool_call.name, policy) {
+        guard.record_error();
+        return ToolResult {
+            name: tool_call.name.clone(),
+            output: serde_json::json!({
+                "error": format!("tool '{}' denied by policy", tool_call.name)
+            }),
+            is_error: true,
+        };
     }
 
-    policy
-        .allow_tools
-        .as_ref()
-        .is_none_or(|allow_tools| allow_tools.iter().any(|allow| tools_match(allow, tool)))
-}
-
-fn tools_match(lhs: &str, rhs: &str) -> bool {
-    let lhs_lower = lhs.to_ascii_lowercase();
-    let rhs_lower = rhs.to_ascii_lowercase();
-    lhs_lower == rhs_lower || tool_key(lhs) == tool_key(rhs)
-}
-
-fn tool_key(tool: &str) -> String {
-    let lower = tool.to_ascii_lowercase();
-    lower.split_once('(').map_or_else(|| lower.clone(), |(prefix, _)| prefix.to_string())
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms),
+        tools.call_tool(tool_call.clone()),
+    )
+    .await
+    {
+        Ok(Ok(result)) => {
+            guard.reset_errors();
+            result
+        }
+        Ok(Err(err)) => {
+            guard.record_error();
+            ToolResult {
+                name: tool_call.name,
+                output: serde_json::json!({"error": err.to_string()}),
+                is_error: true,
+            }
+        }
+        Err(_) => {
+            guard.record_error();
+            ToolResult {
+                name: tool_call.name,
+                output: serde_json::json!({"error": "tool call timed out"}),
+                is_error: true,
+            }
+        }
+    }
 }
 
 // ── Turn Loop FSM ────────────────────────────────────────────────────
@@ -377,46 +371,14 @@ pub(crate) async fn run_turn(
                         // ── 5. CallTool ──────────────────────────
                         events.emit(AgentEvent::ToolCallStarted { name: name.clone() });
 
-                        let tool_call = ToolCall { name: name.clone(), arguments };
-
-                        let tool_result = if is_tool_allowed_by_policy(&name, &tool_call_policy) {
-                            match tokio::time::timeout(
-                                std::time::Duration::from_millis(policy.tool_timeout_ms),
-                                tools.call_tool(tool_call),
-                            )
-                            .await
-                            {
-                                Ok(Ok(result)) => {
-                                    guard.reset_errors();
-                                    result
-                                }
-                                Ok(Err(e)) => {
-                                    guard.record_error();
-                                    ToolResult {
-                                        name: name.clone(),
-                                        output: serde_json::json!({"error": e.to_string()}),
-                                        is_error: true,
-                                    }
-                                }
-                                Err(_timeout) => {
-                                    guard.record_error();
-                                    ToolResult {
-                                        name: name.clone(),
-                                        output: serde_json::json!({"error": "tool call timed out"}),
-                                        is_error: true,
-                                    }
-                                }
-                            }
-                        } else {
-                            guard.record_error();
-                            ToolResult {
-                                name: name.clone(),
-                                output: serde_json::json!({
-                                    "error": format!("tool '{name}' denied by policy")
-                                }),
-                                is_error: true,
-                            }
-                        };
+                        let tool_result = execute_tool_call(
+                            tools,
+                            &mut guard,
+                            ToolCall { name: name.clone(), arguments },
+                            &tool_call_policy,
+                            policy.tool_timeout_ms,
+                        )
+                        .await;
 
                         guard.record_tool_call();
 
@@ -629,45 +591,14 @@ async fn run_turn_stream_inner(
                         call_id: call_id.clone(),
                     });
 
-                    let tool_call = ToolCall { name: name.clone(), arguments };
-                    let tool_result = if is_tool_allowed_by_policy(&name, &tool_call_policy) {
-                        match tokio::time::timeout(
-                            std::time::Duration::from_millis(config.policy.tool_timeout_ms),
-                            tools.call_tool(tool_call),
-                        )
-                        .await
-                        {
-                            Ok(Ok(result)) => {
-                                guard.reset_errors();
-                                result
-                            }
-                            Ok(Err(err)) => {
-                                guard.record_error();
-                                ToolResult {
-                                    name: name.clone(),
-                                    output: serde_json::json!({"error": err.to_string()}),
-                                    is_error: true,
-                                }
-                            }
-                            Err(_) => {
-                                guard.record_error();
-                                ToolResult {
-                                    name: name.clone(),
-                                    output: serde_json::json!({"error": "tool call timed out"}),
-                                    is_error: true,
-                                }
-                            }
-                        }
-                    } else {
-                        guard.record_error();
-                        ToolResult {
-                            name: name.clone(),
-                            output: serde_json::json!({
-                                "error": format!("tool '{name}' denied by policy")
-                            }),
-                            is_error: true,
-                        }
-                    };
+                    let tool_result = execute_tool_call(
+                        tools.as_ref(),
+                        &mut guard,
+                        ToolCall { name: name.clone(), arguments },
+                        &tool_call_policy,
+                        config.policy.tool_timeout_ms,
+                    )
+                    .await;
 
                     guard.record_tool_call();
                     let is_error = tool_result.is_error;
@@ -898,7 +829,9 @@ mod tests {
         }
 
         async fn call_tool(&self, _call: ToolCall) -> Result<ToolResult, ToolError> {
-            panic!("tool call should be blocked by policy before execution");
+            Err(ToolError::Execution(
+                "tool call should be blocked by policy before execution".to_string(),
+            ))
         }
     }
 
@@ -968,7 +901,7 @@ mod tests {
             input: input.into(),
             session_id: "test-session".into(),
             model: None,
-            metadata: HashMap::new(),
+            context: bob_core::types::RequestContext::default(),
             cancel_token: None,
         }
     }
@@ -1058,9 +991,13 @@ mod tests {
         )
         .await;
 
+        assert!(
+            matches!(&result, Ok(AgentRunResult::Finished(_))),
+            "expected Finished, got {result:?}"
+        );
         let resp = match result {
             Ok(AgentRunResult::Finished(r)) => r,
-            other => panic!("expected Finished, got {other:?}"),
+            _ => return,
         };
 
         assert_eq!(resp.content, "Hello there!");
@@ -1099,9 +1036,13 @@ mod tests {
         )
         .await;
 
+        assert!(
+            matches!(&result, Ok(AgentRunResult::Finished(_))),
+            "expected Finished, got {result:?}"
+        );
         let resp = match result {
             Ok(AgentRunResult::Finished(r)) => r,
-            other => panic!("expected Finished, got {other:?}"),
+            _ => return,
         };
 
         assert_eq!(resp.content, "Found results.");
@@ -1134,9 +1075,13 @@ mod tests {
         )
         .await;
 
+        assert!(
+            matches!(&result, Ok(AgentRunResult::Finished(_))),
+            "expected Finished after re-prompt, got {result:?}"
+        );
         let resp = match result {
             Ok(AgentRunResult::Finished(r)) => r,
-            other => panic!("expected Finished after re-prompt, got {other:?}"),
+            _ => return,
         };
 
         assert_eq!(resp.content, "Recovered");
@@ -1164,8 +1109,10 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "should return error after two parse failures");
-        let err = result.unwrap_err();
-        let msg = err.to_string();
+        let msg = match result {
+            Err(err) => err.to_string(),
+            Ok(value) => format!("unexpected success: {value:?}"),
+        };
         assert!(msg.contains("invalid JSON"), "error message = {msg}");
     }
 
@@ -1215,9 +1162,13 @@ mod tests {
             run_turn(&llm, &tools, &store, &sink, make_request("do work"), &policy, "test-model")
                 .await;
 
+        assert!(
+            matches!(&result, Ok(AgentRunResult::Finished(_))),
+            "expected Finished with GuardExceeded, got {result:?}"
+        );
         let resp = match result {
             Ok(AgentRunResult::Finished(r)) => r,
-            other => panic!("expected Finished with GuardExceeded, got {other:?}"),
+            _ => return,
         };
 
         assert_eq!(resp.finish_reason, FinishReason::GuardExceeded);
@@ -1245,9 +1196,13 @@ mod tests {
         let result =
             run_turn(&llm, &tools, &store, &sink, req, &generous_policy(), "test-model").await;
 
+        assert!(
+            matches!(&result, Ok(AgentRunResult::Finished(_))),
+            "expected Finished with Cancelled, got {result:?}"
+        );
         let resp = match result {
             Ok(AgentRunResult::Finished(r)) => r,
-            other => panic!("expected Finished with Cancelled, got {other:?}"),
+            _ => return,
         };
 
         assert_eq!(resp.finish_reason, FinishReason::Cancelled);
@@ -1279,9 +1234,13 @@ mod tests {
         )
         .await;
 
+        assert!(
+            matches!(&result, Ok(AgentRunResult::Finished(_))),
+            "expected Finished, got {result:?}"
+        );
         let resp = match result {
             Ok(AgentRunResult::Finished(r)) => r,
-            other => panic!("expected Finished, got {other:?}"),
+            _ => return,
         };
 
         assert_eq!(resp.content, "Recovered from tool error.");
@@ -1323,7 +1282,7 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let sink: Arc<dyn EventSink> = Arc::new(CollectingSink::new());
 
-        let mut stream = run_turn_stream(
+        let stream_result = run_turn_stream(
             llm,
             tools,
             store,
@@ -1332,8 +1291,12 @@ mod tests {
             generous_policy(),
             "test-model".to_string(),
         )
-        .await
-        .expect("run_turn_stream should produce a stream");
+        .await;
+        assert!(stream_result.is_ok(), "run_turn_stream should produce a stream");
+        let mut stream = match stream_result {
+            Ok(stream) => stream,
+            Err(_) => return,
+        };
 
         let mut saw_text = false;
         let mut saw_finished = false;
@@ -1358,17 +1321,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tc10_skills_prompt_metadata_is_injected() {
+    async fn tc10_skills_prompt_context_is_injected() {
         let llm = InspectingLlm { expected_substring: "Skill: rust-review".to_string() };
         let tools = MockToolPort::empty();
         let store = MemoryStore::new();
         let sink = CollectingSink::new();
 
         let mut req = make_request("review this code");
-        req.metadata.insert(
-            "skills_prompt".to_string(),
-            serde_json::Value::String("Skill: rust-review\nUse strict checks.".to_string()),
-        );
+        req.context.system_prompt = Some("Skill: rust-review\nUse strict checks.".to_string());
 
         let result =
             run_turn(&llm, &tools, &store, &sink, req, &generous_policy(), "test-model").await;
@@ -1377,7 +1337,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tc11_selected_skills_metadata_emits_event() {
+    async fn tc11_selected_skills_context_emits_event() {
         let llm =
             SequentialLlm::from_contents(vec![r#"{"type": "final", "content": "looks good"}"#]);
         let tools = MockToolPort::empty();
@@ -1385,10 +1345,7 @@ mod tests {
         let sink = CollectingSink::new();
 
         let mut req = make_request("review code");
-        req.metadata.insert(
-            "selected_skills".to_string(),
-            serde_json::json!(["rust-review", "security-audit"]),
-        );
+        req.context.selected_skills = vec!["rust-review".to_string(), "security-audit".to_string()];
 
         let result =
             run_turn(&llm, &tools, &store, &sink, req, &generous_policy(), "test-model").await;
@@ -1401,7 +1358,7 @@ mod tests {
                 AgentEvent::SkillsSelected { skill_names }
                     if skill_names == &vec!["rust-review".to_string(), "security-audit".to_string()]
             )),
-            "skills.selected event should be emitted with metadata skill names"
+            "skills.selected event should be emitted with context skill names"
         );
     }
 
@@ -1423,14 +1380,18 @@ mod tests {
         let sink = CollectingSink::new();
 
         let mut req = make_request("search rust");
-        req.metadata
-            .insert("deny_tools".to_string(), serde_json::json!(["search", "local/shell_exec"]));
+        req.context.tool_policy.deny_tools =
+            vec!["search".to_string(), "local/shell_exec".to_string()];
 
         let result =
             run_turn(&llm, &tools, &store, &sink, req, &generous_policy(), "test-model").await;
+        assert!(
+            matches!(&result, Ok(AgentRunResult::Finished(_))),
+            "expected finished response, got {result:?}"
+        );
         let resp = match result {
             Ok(AgentRunResult::Finished(r)) => r,
-            other => panic!("expected finished response, got {other:?}"),
+            _ => return,
         };
 
         assert_eq!(resp.finish_reason, FinishReason::Stop);

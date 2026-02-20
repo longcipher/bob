@@ -67,10 +67,14 @@
 
 pub mod error;
 pub mod ports;
+pub mod tool_policy;
 pub mod types;
 
 // ── Re-exports ───────────────────────────────────────────────────────
 
 pub use error::{AgentError, LlmError, StoreError, ToolError};
 pub use ports::{EventSink, LlmPort, SessionStore, ToolPort};
+pub use tool_policy::{
+    intersect_allowlists, is_tool_allowed, merge_allowlists, normalize_tool_list, tools_match,
+};
 pub use types::*;

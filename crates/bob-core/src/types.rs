@@ -23,7 +23,7 @@
 //!
 //! All types are `Send + Sync` and can be safely shared across threads.
 
-use std::{collections::HashMap, pin::Pin};
+use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
@@ -46,10 +46,30 @@ pub struct AgentRequest {
     pub session_id: SessionId,
     /// Model override (e.g. `"openai:gpt-4o-mini"`). `None` uses config default.
     pub model: Option<String>,
-    /// Arbitrary metadata forwarded to adapters.
-    pub metadata: HashMap<String, serde_json::Value>,
+    /// Structured per-turn context (skills, prompt extensions, tool policy).
+    pub context: RequestContext,
     /// Optional cancellation handle.
     pub cancel_token: Option<CancelToken>,
+}
+
+/// Structured per-turn request context.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RequestContext {
+    /// Extra instructions appended to the runtime system prompt.
+    pub system_prompt: Option<String>,
+    /// Skill names selected for this request.
+    pub selected_skills: Vec<String>,
+    /// Tool call policy resolved for this request.
+    pub tool_policy: RequestToolPolicy,
+}
+
+/// Tool policy attached to a request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RequestToolPolicy {
+    /// Tool names denied for this request.
+    pub deny_tools: Vec<String>,
+    /// Optional request allowlist. `None` means "allow all not denied".
+    pub allow_tools: Option<Vec<String>>,
 }
 
 /// Final agent output.

@@ -44,6 +44,9 @@ pub enum AgentError {
     #[error("Policy violation: {0}")]
     Policy(String),
 
+    #[error("configuration error: {0}")]
+    Config(String),
+
     #[error("Store error: {0}")]
     Store(#[from] StoreError),
 

@@ -55,6 +55,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use bob_core::{is_tool_allowed, normalize_tool_list};
+
 /// One skill source entry.
 #[derive(Debug, Clone)]
 pub struct SkillSourceConfig {
@@ -413,39 +415,13 @@ fn effective_allowed_tools(skill: &LoadedSkill, policy: &SkillSelectionPolicy) -
         return Vec::new();
     }
 
-    let mut allowed = skill
-        .allowed_tools
-        .iter()
-        .filter(|tool| !is_tool_denied(tool, &policy.deny_tools))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    if let Some(runtime_allow_tools) = &policy.allow_tools {
-        allowed.retain(|tool| is_tool_allowed(tool, runtime_allow_tools));
-    }
-
-    allowed.sort();
-    allowed.dedup();
-    allowed
-}
-
-fn is_tool_denied(tool: &str, deny_tools: &[String]) -> bool {
-    deny_tools.iter().any(|deny| tools_match(deny, tool))
-}
-
-fn is_tool_allowed(tool: &str, allow_tools: &[String]) -> bool {
-    allow_tools.iter().any(|allow| tools_match(allow, tool))
-}
-
-fn tools_match(lhs: &str, rhs: &str) -> bool {
-    let lhs_lower = lhs.to_ascii_lowercase();
-    let rhs_lower = rhs.to_ascii_lowercase();
-    lhs_lower == rhs_lower || tool_key(lhs) == tool_key(rhs)
-}
-
-fn tool_key(tool: &str) -> String {
-    let lower = tool.to_ascii_lowercase();
-    lower.split_once('(').map_or_else(|| lower.clone(), |(prefix, _)| prefix.to_string())
+    normalize_tool_list(
+        skill
+            .allowed_tools
+            .iter()
+            .filter(|tool| is_tool_allowed(tool, &policy.deny_tools, policy.allow_tools.as_deref()))
+            .map(String::as_str),
+    )
 }
 
 fn parse_tags(raw: &str) -> Vec<String> {
@@ -511,43 +487,47 @@ mod tests {
 
     use super::*;
 
-    fn write_skill(root: &Path, name: &str, description: &str, body: &str) -> PathBuf {
+    fn write_skill(
+        root: &Path,
+        name: &str,
+        description: &str,
+        body: &str,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let dir = root.join(name);
-        fs::create_dir_all(&dir).expect("create skill dir");
+        fs::create_dir_all(&dir)?;
         fs::write(
             dir.join("SKILL.md"),
             format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\n{body}\n"),
-        )
-        .expect("write skill");
-        dir
+        )?;
+        Ok(dir)
     }
 
     #[test]
-    fn loads_skills_from_directory_source() {
-        let temp = TempDir::new().expect("temp dir");
+    fn loads_skills_from_directory_source() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
         let skills_root = temp.path().join("skills");
-        fs::create_dir_all(&skills_root).expect("skills root");
+        fs::create_dir_all(&skills_root)?;
 
         write_skill(
             &skills_root,
             "rust-review",
             "Review Rust code for correctness.",
             "Focus on bug risk.",
-        );
+        )?;
         write_skill(
             &skills_root,
             "sql-tuning",
             "Optimize SQL queries.",
             "Look for missing indexes.",
-        );
+        )?;
 
         let loaded =
-            load_skills_from_sources(&[SkillSourceConfig { path: skills_root, recursive: false }])
-                .expect("load skills");
+            load_skills_from_sources(&[SkillSourceConfig { path: skills_root, recursive: false }])?;
 
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].name, "rust-review");
         assert_eq!(loaded[1].name, "sql-tuning");
+        Ok(())
     }
 
     #[test]
@@ -595,28 +575,27 @@ mod tests {
     }
 
     #[test]
-    fn selects_skill_by_metadata_tags() {
-        let temp = TempDir::new().expect("temp dir");
+    fn selects_skill_by_metadata_tags() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
         let skills_root = temp.path().join("skills");
-        fs::create_dir_all(&skills_root).expect("skills root");
+        fs::create_dir_all(&skills_root)?;
 
         let dir = skills_root.join("db-advisor");
-        fs::create_dir_all(&dir).expect("create skill dir");
+        fs::create_dir_all(&dir)?;
         fs::write(
             dir.join("SKILL.md"),
             "---\nname: db-advisor\ndescription: Generic advisor.\nmetadata:\n  tags: postgres migration\n---\n\n# db-advisor\n\nFollow checklist carefully.\n",
-        )
-        .expect("write skill");
+        )?;
 
         let composer = SkillPromptComposer::from_sources(
             &[SkillSourceConfig { path: skills_root, recursive: false }],
             3,
-        )
-        .expect("load skills");
+        )?;
 
         let selected = composer.select_for_input("need postgres migration plan");
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].name, "db-advisor");
+        Ok(())
     }
 
     #[test]

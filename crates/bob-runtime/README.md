@@ -43,27 +43,27 @@ bob-runtime = "0.1"
 ### Example: Creating a Runtime
 
 ```rust
-use bob_runtime::{DefaultAgentRuntime, AgentRuntime};
+use bob_runtime::{AgentBootstrap, AgentRuntime, RuntimeBuilder};
 use bob_core::{
     ports::{LlmPort, ToolPort, SessionStore, EventSink},
-    types::{AgentRequest, TurnPolicy},
+    types::TurnPolicy,
 };
 use std::sync::Arc;
 
-async fn create_runtime(
+fn create_runtime(
     llm: Arc<dyn LlmPort>,
     tools: Arc<dyn ToolPort>,
     store: Arc<dyn SessionStore>,
     events: Arc<dyn EventSink>,
-) -> Arc<dyn AgentRuntime> {
-    Arc::new(DefaultAgentRuntime {
-        llm,
-        tools,
-        store,
-        events,
-        default_model: "openai:gpt-4o-mini".to_string(),
-        policy: TurnPolicy::default(),
-    })
+) -> Result<Arc<dyn AgentRuntime>, bob_core::error::AgentError> {
+    RuntimeBuilder::new()
+        .with_llm(llm)
+        .with_tools(tools)
+        .with_store(store)
+        .with_events(events)
+        .with_default_model("openai:gpt-4o-mini")
+        .with_policy(TurnPolicy::default())
+        .build()
 }
 ```
 
@@ -76,7 +76,7 @@ let request = AgentRequest {
     input: "Write a hello world program".to_string(),
     session_id: "session-123".to_string(),
     model: None,
-    metadata: Default::default(),
+    context: Default::default(),
     cancel_token: None,
 };
 

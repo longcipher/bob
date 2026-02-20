@@ -12,15 +12,13 @@ categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
 
 [dependencies]
-async-trait = { workspace = true }
-bob-adapters = { path = "../../crates/bob-adapters" }
-bob-runtime = { path = "../../crates/bob-runtime" }
+bob-adapters = { workspace = true }
+bob-runtime = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 config = { workspace = true }
 eyre = { workspace = true }
 genai = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "io-util"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 

@@ -127,7 +127,7 @@ max_selected = 3
 token_budget_ratio = 0.1
 
 [[skills.sources]]
-source_type = "directory"
+type = "directory"
 path = "./skills"
 recursive = false
 

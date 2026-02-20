@@ -16,10 +16,15 @@ exclude = [".github/"]
 resolver = "3"
 
 [workspace.dependencies]
-# Agent framework
+# internal crates
+bob-adapters = { path = "crates/bob-adapters" }
+bob-runtime = { path = "crates/bob-runtime" }
+bob-core = { path = "crates/bob-core" }
+
+# external crates
 agent-skills = "0.2"
 async-trait = "0.1"
-futures-core = "0.3"
+futures-core = "0.3.32"
 futures-util = "0.3"
 genai = "=0.6.0-beta.1"
 rmcp = { version = "0.16", features = [
@@ -27,7 +32,7 @@ rmcp = { version = "0.16", features = [
     "transport-child-process",
     "transport-streamable-http-client",
 ] }
-scc = "3"
+scc = "3.6.4"
 serde = "1.0.228"
 serde_json = "1"
 thiserror = "2.0.18"
@@ -44,7 +49,7 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.22"
 
 # CLI
-clap = "4.5.56"
+clap = "4.5.60"
 config = "0.15.19"
 eyre = "0.6.12"
 

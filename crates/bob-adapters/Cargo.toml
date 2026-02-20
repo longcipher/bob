@@ -22,7 +22,7 @@ store-memory = []
 
 [dependencies]
 async-trait = { workspace = true }
-bob-core = { path = "../bob-core" }
+bob-core = { workspace = true }
 futures-util = { workspace = true }
 scc = { workspace = true }
 serde_json = { workspace = true }

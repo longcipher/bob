@@ -165,11 +165,13 @@ mod tests {
     #[async_trait::async_trait]
     impl SessionStore for MockSessionStore {
         async fn load(&self, id: &SessionId) -> Result<Option<SessionState>, StoreError> {
-            Ok(self.inner.lock().unwrap().get(id).cloned())
+            let map = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            Ok(map.get(id).cloned())
         }
 
         async fn save(&self, id: &SessionId, state: &SessionState) -> Result<(), StoreError> {
-            self.inner.lock().unwrap().insert(id.clone(), state.clone());
+            let mut map = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            map.insert(id.clone(), state.clone());
             Ok(())
         }
     }
@@ -188,7 +190,8 @@ mod tests {
 
     impl EventSink for MockEventSink {
         fn emit(&self, event: AgentEvent) {
-            self.events.lock().unwrap().push(event);
+            let mut events = self.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            events.push(event);
         }
     }
 
@@ -206,9 +209,12 @@ mod tests {
 
         let req = LlmRequest { model: "test-model".into(), messages: vec![], tools: vec![] };
 
-        let resp = llm.complete(req).await.unwrap();
-        assert_eq!(resp.content, "Hello!");
-        assert_eq!(resp.usage.total(), 15);
+        let resp = llm.complete(req).await;
+        assert!(resp.is_ok(), "complete should succeed");
+        if let Ok(resp) = resp {
+            assert_eq!(resp.content, "Hello!");
+            assert_eq!(resp.usage.total(), 15);
+        }
     }
 
     #[tokio::test]
@@ -222,18 +228,23 @@ mod tests {
             }],
         });
 
-        let listed = tools.list_tools().await.unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, "test/echo");
+        let listed = tools.list_tools().await;
+        assert!(listed.is_ok(), "list_tools should succeed");
+        if let Ok(listed) = listed {
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].id, "test/echo");
+        }
 
         let result = tools
             .call_tool(ToolCall {
                 name: "test/echo".into(),
                 arguments: serde_json::json!({"msg": "hi"}),
             })
-            .await
-            .unwrap();
-        assert!(!result.is_error);
+            .await;
+        assert!(result.is_ok(), "call_tool should succeed");
+        if let Ok(result) = result {
+            assert!(!result.is_error);
+        }
     }
 
     #[tokio::test]
@@ -241,7 +252,8 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(MockSessionStore::new());
 
         let id = "session-1".to_string();
-        assert!(store.load(&id).await.unwrap().is_none());
+        let loaded_before = store.load(&id).await;
+        assert!(matches!(loaded_before, Ok(None)));
 
         let state = SessionState {
             messages: vec![crate::types::Message {
@@ -251,10 +263,15 @@ mod tests {
             ..Default::default()
         };
 
-        store.save(&id, &state).await.unwrap();
-        let loaded = store.load(&id).await.unwrap().unwrap();
-        assert_eq!(loaded.messages.len(), 1);
-        assert_eq!(loaded.messages[0].content, "hello");
+        let saved = store.save(&id, &state).await;
+        assert!(saved.is_ok(), "save should succeed");
+
+        let loaded = store.load(&id).await;
+        assert!(matches!(loaded, Ok(Some(_))), "load should return stored state");
+        if let Ok(Some(loaded)) = loaded {
+            assert_eq!(loaded.messages.len(), 1);
+            assert_eq!(loaded.messages[0].content, "hello");
+        }
     }
 
     #[test]
@@ -263,7 +280,7 @@ mod tests {
         sink.emit(AgentEvent::TurnStarted { session_id: "s1".into() });
         sink.emit(AgentEvent::Error { error: "boom".into() });
 
-        let events = sink.events.lock().unwrap();
+        let events = sink.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(events.len(), 2);
     }
 

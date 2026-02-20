@@ -30,27 +30,27 @@
 //! ## Example
 //!
 //! ```rust,ignore
-//! use bob_runtime::{DefaultAgentRuntime, AgentRuntime};
+//! use bob_runtime::{AgentBootstrap, AgentRuntime, RuntimeBuilder};
 //! use bob_core::{
 //!     ports::{LlmPort, ToolPort, SessionStore, EventSink},
-//!     types::{AgentRequest, TurnPolicy},
+//!     types::TurnPolicy,
 //! };
 //! use std::sync::Arc;
 //!
-//! async fn create_runtime(
+//! fn create_runtime(
 //!     llm: Arc<dyn LlmPort>,
 //!     tools: Arc<dyn ToolPort>,
 //!     store: Arc<dyn SessionStore>,
 //!     events: Arc<dyn EventSink>,
-//! ) -> Arc<dyn AgentRuntime> {
-//!     Arc::new(DefaultAgentRuntime {
-//!         llm,
-//!         tools,
-//!         store,
-//!         events,
-//!         default_model: "openai:gpt-4o-mini".to_string(),
-//!         policy: TurnPolicy::default(),
-//!     })
+//! ) -> Result<Arc<dyn AgentRuntime>, bob_core::error::AgentError> {
+//!     RuntimeBuilder::new()
+//!         .with_llm(llm)
+//!         .with_tools(tools)
+//!         .with_store(store)
+//!         .with_events(events)
+//!         .with_default_model("openai:gpt-4o-mini")
+//!         .with_policy(TurnPolicy::default())
+//!         .build()
 //! }
 //! ```
 //!
@@ -81,6 +81,7 @@ pub mod action;
 pub mod composite;
 pub mod prompt;
 pub mod scheduler;
+pub mod tooling;
 
 use std::sync::Arc;
 
@@ -92,28 +93,123 @@ use bob_core::{
         AgentEventStream, AgentRequest, AgentRunResult, HealthStatus, RuntimeHealth, TurnPolicy,
     },
 };
+pub use tooling::{NoOpToolPort, TimeoutToolLayer, ToolLayer};
 
-// ── Bootstrap Trait ──────────────────────────────────────────────────
+// ── Bootstrap / Builder ───────────────────────────────────────────────
 
-/// Configuration for an MCP server to connect at startup.
-#[derive(Debug, Clone)]
-pub struct McpServerConfig {
-    pub id: String,
-    pub transport: String,
-    pub command: Option<String>,
-    pub args: Vec<String>,
-}
-
-/// Builder trait: configure the runtime, then freeze it into an `AgentRuntime`.
-#[async_trait::async_trait]
+/// Bootstrap contract for producing an [`AgentRuntime`].
 pub trait AgentBootstrap: Send {
-    /// Register an MCP server to discover tools from.
-    async fn register_mcp_server(&mut self, cfg: McpServerConfig) -> Result<(), AgentError>;
-
     /// Consume the builder and produce a ready-to-use runtime.
     fn build(self) -> Result<Arc<dyn AgentRuntime>, AgentError>
     where
         Self: Sized;
+}
+
+/// Trait-first runtime builder used by composition roots.
+///
+/// This keeps wiring explicit while avoiding a monolithic `main.rs`.
+#[derive(Default)]
+pub struct RuntimeBuilder {
+    llm: Option<Arc<dyn LlmPort>>,
+    tools: Option<Arc<dyn ToolPort>>,
+    store: Option<Arc<dyn SessionStore>>,
+    events: Option<Arc<dyn EventSink>>,
+    default_model: Option<String>,
+    policy: TurnPolicy,
+    tool_layers: Vec<Arc<dyn ToolLayer>>,
+}
+
+impl std::fmt::Debug for RuntimeBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeBuilder")
+            .field("has_llm", &self.llm.is_some())
+            .field("has_tools", &self.tools.is_some())
+            .field("has_store", &self.store.is_some())
+            .field("has_events", &self.events.is_some())
+            .field("default_model", &self.default_model)
+            .field("policy", &self.policy)
+            .field("tool_layers", &self.tool_layers.len())
+            .finish()
+    }
+}
+
+impl RuntimeBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_llm(mut self, llm: Arc<dyn LlmPort>) -> Self {
+        self.llm = Some(llm);
+        self
+    }
+
+    #[must_use]
+    pub fn with_tools(mut self, tools: Arc<dyn ToolPort>) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    #[must_use]
+    pub fn with_store(mut self, store: Arc<dyn SessionStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn with_events(mut self, events: Arc<dyn EventSink>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    #[must_use]
+    pub fn with_default_model(mut self, default_model: impl Into<String>) -> Self {
+        self.default_model = Some(default_model.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_policy(mut self, policy: TurnPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    #[must_use]
+    pub fn add_tool_layer(mut self, layer: Arc<dyn ToolLayer>) -> Self {
+        self.tool_layers.push(layer);
+        self
+    }
+
+    fn into_runtime(self) -> Result<Arc<dyn AgentRuntime>, AgentError> {
+        let llm = self.llm.ok_or_else(|| AgentError::Config("missing LLM port".to_string()))?;
+        let store =
+            self.store.ok_or_else(|| AgentError::Config("missing session store".to_string()))?;
+        let events =
+            self.events.ok_or_else(|| AgentError::Config("missing event sink".to_string()))?;
+        let default_model = self
+            .default_model
+            .ok_or_else(|| AgentError::Config("missing default model".to_string()))?;
+
+        let mut tools: Arc<dyn ToolPort> =
+            self.tools.unwrap_or_else(|| Arc::new(NoOpToolPort) as Arc<dyn ToolPort>);
+        for layer in self.tool_layers {
+            tools = layer.wrap(tools);
+        }
+
+        let rt =
+            DefaultAgentRuntime { llm, tools, store, events, default_model, policy: self.policy };
+        Ok(Arc::new(rt))
+    }
+}
+
+impl AgentBootstrap for RuntimeBuilder {
+    fn build(self) -> Result<Arc<dyn AgentRuntime>, AgentError>
+    where
+        Self: Sized,
+    {
+        self.into_runtime()
+    }
 }
 
 // ── Runtime Trait ────────────────────────────────────────────────────
@@ -186,7 +282,7 @@ impl AgentRuntime for DefaultAgentRuntime {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Mutex};
+    use std::sync::Mutex;
 
     use bob_core::{
         error::{LlmError, StoreError, ToolError},
@@ -246,7 +342,8 @@ mod tests {
 
     impl EventSink for StubSink {
         fn emit(&self, _event: AgentEvent) {
-            *self.count.lock().unwrap() += 1;
+            let mut count = self.count.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *count += 1;
         }
     }
 
@@ -265,16 +362,18 @@ mod tests {
             input: "hello".into(),
             session_id: "test".into(),
             model: None,
-            metadata: HashMap::new(),
+            context: RequestContext::default(),
             cancel_token: None,
         };
 
-        let result = rt.run(req).await.unwrap_or_else(|e| panic!("{e}"));
-        match result {
-            AgentRunResult::Finished(resp) => {
-                assert_eq!(resp.finish_reason, FinishReason::Stop);
-                assert_eq!(resp.content, "stub response");
-            }
+        let result = rt.run(req).await;
+        assert!(
+            matches!(result, Ok(AgentRunResult::Finished(_))),
+            "run should finish successfully"
+        );
+        if let Ok(AgentRunResult::Finished(resp)) = result {
+            assert_eq!(resp.finish_reason, FinishReason::Stop);
+            assert_eq!(resp.content, "stub response");
         }
     }
 
@@ -291,5 +390,14 @@ mod tests {
 
         let health = rt.health().await;
         assert_eq!(health.status, HealthStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn runtime_builder_requires_core_dependencies() {
+        let result = RuntimeBuilder::new().build();
+        assert!(
+            matches!(result, Err(AgentError::Config(msg)) if msg.contains("missing LLM")),
+            "missing llm should return config error"
+        );
     }
 }
