@@ -84,7 +84,13 @@ pub(crate) fn tool_schema_block(tools: &[ToolDescriptor]) -> String {
 ///   1. System message = core instructions + action schema + tool schemas
 ///   2. Session history (truncated to most recent 50 non-system messages)
 ///   3. `LlmRequest { model, messages, tools }`
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "compatibility wrapper retained for callers that use default prompt build options"
+    )
+)]
 pub(crate) fn build_llm_request(
     model: &str,
     session: &SessionState,

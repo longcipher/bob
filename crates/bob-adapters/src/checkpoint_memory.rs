@@ -44,8 +44,9 @@ impl TurnCheckpointStorePort for InMemoryCheckpointStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bob_core::types::TokenUsage;
+
+    use super::*;
 
     #[tokio::test]
     async fn roundtrip_checkpoint() {

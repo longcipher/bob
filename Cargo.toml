@@ -1,13 +1,13 @@
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/longcipher/bob"
 homepage = "https://github.com/longcipher/bob"
 readme = "README.md"
 authors = ["LongCipher Team"]
-description = "LLM-powered coding agent built in Rust with hexagonal architecture"
-keywords = ["ai", "agent", "llm", "coding", "automation"]
+description = "Minimal hexagonal architecture AI agent framework in Rust"
+keywords = ["ai", "agent", "llm", "automation", "framework"]
 categories = ["development-tools", "asynchronous", "api-bindings"]
 
 [workspace]
@@ -17,9 +17,9 @@ resolver = "3"
 
 [workspace.dependencies]
 # internal crates
-bob-adapters = { path = "crates/bob-adapters", version = "0.1.1" }
-bob-runtime = { path = "crates/bob-runtime", version = "0.1.1" }
-bob-core = { path = "crates/bob-core", version = "0.1.1" }
+bob-adapters = { path = "crates/bob-adapters", version = "0.1.2" }
+bob-core = { path = "crates/bob-core", version = "0.1.2" }
+bob-runtime = { path = "crates/bob-runtime", version = "0.1.2" }
 
 # external crates
 agent-skills = "0.2.0"

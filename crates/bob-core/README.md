@@ -75,7 +75,7 @@ Full API documentation is available at [docs.rs/bob-core](https://docs.rs/bob-co
 
 - **[bob-runtime](https://crates.io/crates/bob-runtime)** - Runtime orchestration layer
 - **[bob-adapters](https://crates.io/crates/bob-adapters)** - Concrete adapter implementations
-- **[cli-agent](https://github.com/longcipher/bob)** - CLI application
+- **[bob-cli](https://github.com/longcipher/bob)** - CLI application
 
 ## License
 

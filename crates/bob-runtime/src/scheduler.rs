@@ -79,10 +79,10 @@ impl LoopGuard {
     /// Returns `true` if the turn may continue executing.
     #[must_use]
     pub fn can_continue(&self) -> bool {
-        self.steps < self.policy.max_steps
-            && self.tool_calls < self.policy.max_tool_calls
-            && self.consecutive_errors < self.policy.max_consecutive_errors
-            && !self.timed_out()
+        self.steps < self.policy.max_steps &&
+            self.tool_calls < self.policy.max_tool_calls &&
+            self.consecutive_errors < self.policy.max_consecutive_errors &&
+            !self.timed_out()
     }
 
     /// Record one scheduler step.
@@ -199,19 +199,23 @@ fn parse_action_for_mode(
     match dispatch_mode {
         crate::DispatchMode::PromptGuided => crate::action::parse_action(&response.content),
         crate::DispatchMode::NativePreferred => {
-            if llm.capabilities().native_tool_calling {
-                if let Some(tool_call) = response.tool_calls.first() {
-                    return Ok(AgentAction::ToolCall {
-                        name: tool_call.name.clone(),
-                        arguments: tool_call.arguments.clone(),
-                    });
-                }
+            if llm.capabilities().native_tool_calling &&
+                let Some(tool_call) = response.tool_calls.first()
+            {
+                return Ok(AgentAction::ToolCall {
+                    name: tool_call.name.clone(),
+                    arguments: tool_call.arguments.clone(),
+                });
             }
             crate::action::parse_action(&response.content)
         }
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "tool execution needs explicit policy, approval, and timeout dependencies"
+)]
 async fn execute_tool_call(
     tools: &dyn ToolPort,
     guard: &mut LoopGuard,
@@ -325,7 +329,17 @@ pub async fn run_turn(
 }
 
 /// Execute a single turn with explicit policy/approval controls.
-#[allow(dead_code)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "reserved wrapper for partial control injection in external integrations"
+    )
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "wrapper exposes explicit dependency ports for compatibility and testability"
+)]
 pub(crate) async fn run_turn_with_controls(
     llm: &dyn LlmPort,
     tools: &dyn ToolPort,
@@ -359,6 +373,10 @@ pub(crate) async fn run_turn_with_controls(
 }
 
 /// Execute a single turn with all extensibility controls injected.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "core entrypoint exposes all ports explicitly for adapter injection"
+)]
 pub(crate) async fn run_turn_with_extensions(
     llm: &dyn LlmPort,
     tools: &dyn ToolPort,
@@ -396,8 +414,8 @@ pub(crate) async fn run_turn_with_extensions(
     let mut consecutive_parse_failures: u32 = 0;
 
     loop {
-        if let Some(ref token) = cancel_token
-            && token.is_cancelled()
+        if let Some(ref token) = cancel_token &&
+            token.is_cancelled()
         {
             return finish_turn(
                 store,
@@ -636,6 +654,10 @@ pub async fn run_turn_stream(
 }
 
 /// Execute a single turn in streaming mode with explicit policy/approval controls.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "streaming entrypoint exposes all ports and controls explicitly for composition roots"
+)]
 pub(crate) async fn run_turn_stream_with_controls(
     llm: Arc<dyn LlmPort>,
     tools: Arc<dyn ToolPort>,
@@ -713,8 +735,8 @@ async fn run_turn_stream_inner(
     session.messages.push(Message { role: Role::User, content: req.input.clone() });
 
     loop {
-        if let Some(ref token) = cancel_token
-            && token.is_cancelled()
+        if let Some(ref token) = cancel_token &&
+            token.is_cancelled()
         {
             events.emit(AgentEvent::Error { error: "turn cancelled".to_string() });
             events.emit(AgentEvent::TurnCompleted { finish_reason: FinishReason::Cancelled });
@@ -1706,9 +1728,9 @@ mod tests {
                     assert_eq!(usage.prompt_tokens, 3);
                     assert_eq!(usage.completion_tokens, 4);
                 }
-                AgentStreamEvent::ToolCallStarted { .. }
-                | AgentStreamEvent::ToolCallCompleted { .. }
-                | AgentStreamEvent::Error { .. } => {}
+                AgentStreamEvent::ToolCallStarted { .. } |
+                AgentStreamEvent::ToolCallCompleted { .. } |
+                AgentStreamEvent::Error { .. } => {}
             }
         }
 

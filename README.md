@@ -1,4 +1,4 @@
-# Bob — LLM-Powered Coding Agent
+# Bob — Minimal Hexagonal AI Agent Framework
 
 [![DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/longcipher/bob)
 [![Context7](https://img.shields.io/badge/Website-context7.com-blue)](https://context7.com/longcipher/bob)
@@ -9,7 +9,7 @@
 
 ![bob](https://socialify.git.ci/longcipher/bob/image?font=Source+Code+Pro&language=1&name=1&owner=1&pattern=Circuit+Board&theme=Auto)
 
-**Bob** is an LLM-powered coding agent built in Rust with a hexagonal (ports & adapters) architecture. It connects to language models via the [`genai`](https://crates.io/crates/genai) crate and to external tools via [MCP](https://modelcontextprotocol.io/) servers using [`rmcp`](https://crates.io/crates/rmcp).
+**Bob** is a minimal AI agent framework built in Rust with a hexagonal (ports & adapters) architecture. It connects to language models via the [`genai`](https://crates.io/crates/genai) crate and to external tools via [MCP](https://modelcontextprotocol.io/) servers using [`rmcp`](https://crates.io/crates/rmcp).
 
 ## Features
 
@@ -30,7 +30,7 @@ This workspace contains the following crates:
 | **[bob-core](https://crates.io/crates/bob-core)** | Core domain types and port traits | [![docs.rs](https://docs.rs/bob-core/badge.svg)](https://docs.rs/bob-core) |
 | **[bob-runtime](https://crates.io/crates/bob-runtime)** | Runtime orchestration layer | [![docs.rs](https://docs.rs/bob-runtime/badge.svg)](https://docs.rs/bob-runtime) |
 | **[bob-adapters](https://crates.io/crates/bob-adapters)** | Adapter implementations | [![docs.rs](https://docs.rs/bob-adapters/badge.svg)](https://docs.rs/bob-adapters) |
-| **cli-agent** | CLI application | - |
+| **bob-cli** | CLI application (package: `cli-agent`) | - |
 
 ## Architecture
 
@@ -89,17 +89,17 @@ cd bob
 cargo build --release
 
 # Run
-cargo run --release --bin cli-agent -- --config agent.toml
+cargo run --release --bin bob-cli -- --config agent.toml
 ```
 
 #### Using Cargo
 
 ```bash
-# Install the CLI agent
-cargo install --git https://github.com/longcipher/bob cli-agent
+# Install the CLI binary
+cargo install --git https://github.com/longcipher/bob --package cli-agent --bin bob-cli
 
 # Run
-cli-agent --config agent.toml
+bob-cli --config agent.toml
 ```
 
 ### Configuration
@@ -166,7 +166,7 @@ export GEMINI_API_KEY="..."
 ### Run
 
 ```bash
-cargo run --bin cli-agent -- --config agent.toml
+cargo run --bin bob-cli -- --config agent.toml
 ```
 
 The REPL prints `>` when ready. Type a message and press Enter. Use `/quit` to exit.
@@ -174,24 +174,26 @@ The REPL prints `>` when ready. Type a message and press Enter. Use `/quit` to e
 ### Example Session
 
 ```text
-> Read the main.rs file and explain what it does
+> Summarize docs/design.md in 5 bullets
 
-I'll read the main.rs file for you...
+I'll read docs/design.md and summarize it...
 
-[uses filesystem tool to read the file]
+[uses filesystem tool to read the document]
 
-The main.rs file implements the CLI agent composition root. It loads
-configuration, wires up adapters (LLM, tools, storage, events), creates
-the runtime, and runs the REPL loop.
+Key points from docs/design.md:
+- Framework follows strict ports-and-adapters boundaries
+- Runtime orchestrates turn FSM and policies
+- Adapters isolate provider/tool integrations
+- ...
 
-> Now add error handling to that function
+> Translate those bullets to Chinese
 
-[agent modifies the code]
+[agent generates translated output]
 
-I've added error handling to the function. The changes include:
-- Using `Result` return type
-- Adding context with `.wrap_err()`
-- Handling specific error cases
+已翻译如下：
+- 框架遵循严格的端口与适配器边界
+- Runtime 负责回合状态机与策略控制
+- ...
 ```
 
 ## Supported LLM Providers
@@ -244,7 +246,7 @@ just ci
 ```text
 .
 ├── bin/
-│   └── cli-agent/          # CLI application
+│   └── cli-agent/          # CLI package (binary: bob-cli)
 ├── crates/
 │   ├── bob-core/           # Domain types and ports
 │   ├── bob-runtime/        # Runtime orchestration

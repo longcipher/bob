@@ -1,4 +1,4 @@
-# cli-agent
+# bob-cli (package: cli-agent)
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
@@ -6,7 +6,7 @@ CLI agent for the [Bob Agent Framework](https://github.com/longcipher/bob).
 
 ## Overview
 
-`cli-agent` is a command-line interface for Bob, an LLM-powered coding assistant. It provides:
+`bob-cli` is a command-line interface for Bob, a general-purpose AI agent framework. It provides:
 
 - **Interactive REPL**: Chat with the AI agent through a terminal interface
 - **Multi-Model Support**: Works with OpenAI, Anthropic, Google, and other LLM providers
@@ -23,7 +23,7 @@ git clone https://github.com/longcipher/bob
 cd bob
 
 # Build and run
-cargo run --bin cli-agent -- --config agent.toml
+cargo run --bin bob-cli -- --config agent.toml
 ```
 
 ### Binary Release
@@ -100,7 +100,7 @@ export GEMINI_API_KEY="..."
 ### Starting the Agent
 
 ```bash
-cargo run --bin cli-agent
+cargo run --bin bob-cli
 ```
 
 The agent will start an interactive REPL:
@@ -109,7 +109,7 @@ The agent will start an interactive REPL:
 Bob agent ready  (model: openai:gpt-4o-mini)
 Type a message and press Enter. /quit to exit.
 
-> Write a hello world program in Rust
+> Summarize the latest meeting notes in this folder
 ```
 
 ### REPL Commands
@@ -121,19 +121,19 @@ Type a message and press Enter. /quit to exit.
 ### Example Session
 
 ```text
-> Read the main.rs file and explain what it does
+> Read docs/design.md and explain it in simple terms
 
-I'll read the main.rs file for you...
+I'll read docs/design.md for you...
 
-[uses filesystem tool to read the file]
+[uses filesystem tool to read the document]
 
-The main.rs file implements...
+The design document describes...
 
-> Now add error handling to that function
+> Translate this explanation into Chinese
 
-[agent modifies the code]
+[agent produces translated output]
 
-I've added error handling to the function. The changes include...
+Here is the translated explanation...
 ```
 
 ## Features
@@ -161,10 +161,10 @@ Connect to MCP servers for extended capabilities:
 
 Apply predefined skills for specialized tasks:
 
-- Code review
-- Documentation generation
-- Test writing
-- Refactoring
+- Knowledge extraction
+- Summarization and transformation
+- Workflow automation
+- Domain-specific orchestration
 
 ### Session Persistence
 
@@ -174,10 +174,10 @@ Sessions are persisted in-memory (development) or can be configured for persiste
 
 ```bash
 # Run in development mode
-cargo run --bin cli-agent
+cargo run --bin bob-cli
 
 # Build release binary
-cargo build --bin cli-agent --release
+cargo build --bin bob-cli --release
 
 # Run tests
 cargo test -p cli-agent

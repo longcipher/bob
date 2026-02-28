@@ -164,10 +164,10 @@ impl LlmPort for GenAiLlmAdapter {
                     Some(Ok(LlmStreamChunk::Done { usage }))
                 }
                 Ok(
-                    ChatStreamEvent::Start
-                    | ChatStreamEvent::ReasoningChunk(_)
-                    | ChatStreamEvent::ThoughtSignatureChunk(_)
-                    | ChatStreamEvent::ToolCallChunk(_),
+                    ChatStreamEvent::Start |
+                    ChatStreamEvent::ReasoningChunk(_) |
+                    ChatStreamEvent::ThoughtSignatureChunk(_) |
+                    ChatStreamEvent::ToolCallChunk(_),
                 ) => None,
                 Err(err) => Some(Err(map_genai_error(err))),
             }

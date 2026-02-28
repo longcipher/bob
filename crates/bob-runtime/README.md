@@ -73,7 +73,7 @@ fn create_runtime(
 use bob_core::types::AgentRequest;
 
 let request = AgentRequest {
-    input: "Write a hello world program".to_string(),
+    input: "Summarize this document in three bullet points".to_string(),
     session_id: "session-123".to_string(),
     model: None,
     context: Default::default(),
@@ -106,7 +106,7 @@ Full API documentation is available at [docs.rs/bob-runtime](https://docs.rs/bob
 
 - **[bob-core](https://crates.io/crates/bob-core)** - Domain types and ports
 - **[bob-adapters](https://crates.io/crates/bob-adapters)** - Concrete implementations
-- **[cli-agent](https://github.com/longcipher/bob)** - CLI application
+- **[bob-cli](https://github.com/longcipher/bob)** - CLI application
 
 ## License
 

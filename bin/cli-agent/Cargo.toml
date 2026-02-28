@@ -6,10 +6,15 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-description = "CLI agent for Bob - LLM-powered coding assistant"
-keywords = ["cli", "agent", "ai", "llm", "coding-assistant"]
+description = "CLI app for Bob - a general-purpose AI agent framework"
+keywords = ["cli", "agent", "ai", "llm", "automation"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
+autobins = false
+
+[[bin]]
+name = "bob-cli"
+path = "src/main.rs"
 
 [dependencies]
 bob-adapters = { workspace = true }

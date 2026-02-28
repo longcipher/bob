@@ -17,7 +17,7 @@ use crate::{
     request_context::build_request_context,
 };
 
-/// Bob CLI Agent — an LLM-powered coding assistant.
+/// Bob CLI Agent — a general-purpose AI assistant CLI.
 #[derive(Parser, Debug)]
 #[command(name = "bob", version, about)]
 struct Cli {

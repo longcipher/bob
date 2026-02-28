@@ -86,7 +86,7 @@ let sources = vec![SkillSourceConfig {
 }];
 
 let composer = SkillPromptComposer::from_sources(&sources, 3)?;
-let rendered = composer.render_bundle_for_input("write a test");
+let rendered = composer.render_bundle_for_input("summarize this incident report");
 ```
 
 ## Adapters
@@ -145,7 +145,7 @@ Full API documentation is available at [docs.rs/bob-adapters](https://docs.rs/bo
 
 - **[bob-core](https://crates.io/crates/bob-core)** - Domain types and ports
 - **[bob-runtime](https://crates.io/crates/bob-runtime)** - Runtime orchestration
-- **[cli-agent](https://github.com/longcipher/bob)** - CLI application
+- **[bob-cli](https://github.com/longcipher/bob)** - CLI application
 
 ## License
 
