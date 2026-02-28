@@ -34,7 +34,7 @@ Execute the following steps in order.
 
 1. `specs/<spec-dir>/design.md` — the current design.
 2. `specs/<spec-dir>/tasks.md` — the current task breakdown.
-3. `AGENTS.md` (if it exists) — project context.
+3. `AGENTS.md` (if it exists) — non-obvious constraints and gotchas.
 
 ### Step 2: Parse User Feedback
 

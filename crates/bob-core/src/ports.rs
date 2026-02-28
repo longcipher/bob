@@ -53,10 +53,11 @@
 //! ```
 
 use crate::{
-    error::{LlmError, StoreError, ToolError},
+    error::{CostError, LlmError, StoreError, ToolError},
     types::{
-        AgentEvent, LlmRequest, LlmResponse, LlmStream, SessionId, SessionState, ToolCall,
-        ToolDescriptor, ToolResult,
+        AgentEvent, ApprovalContext, ApprovalDecision, ArtifactRecord, LlmCapabilities, LlmRequest,
+        LlmResponse, LlmStream, SessionId, SessionState, TokenUsage, ToolCall, ToolDescriptor,
+        ToolResult, TurnCheckpoint,
     },
 };
 
@@ -65,6 +66,12 @@ use crate::{
 /// Port for LLM inference (complete and stream).
 #[async_trait::async_trait]
 pub trait LlmPort: Send + Sync {
+    /// Runtime capability declaration for dispatch decisions.
+    #[must_use]
+    fn capabilities(&self) -> LlmCapabilities {
+        LlmCapabilities::default()
+    }
+
     /// Run a non-streaming inference call.
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError>;
 
@@ -74,7 +81,23 @@ pub trait LlmPort: Send + Sync {
 
 // ── Tool Port ────────────────────────────────────────────────────────
 
-/// Port for tool discovery and execution.
+/// Port for tool discovery.
+#[async_trait::async_trait]
+pub trait ToolCatalogPort: Send + Sync {
+    /// List all available tools.
+    async fn list_tools(&self) -> Result<Vec<ToolDescriptor>, ToolError>;
+}
+
+/// Port for tool execution.
+#[async_trait::async_trait]
+pub trait ToolExecutorPort: Send + Sync {
+    /// Execute a tool call and return its result.
+    async fn call_tool(&self, call: ToolCall) -> Result<ToolResult, ToolError>;
+}
+
+/// Backward-compatible composite tool port.
+///
+/// New code should prefer depending on [`ToolCatalogPort`] and [`ToolExecutorPort`] separately.
 #[async_trait::async_trait]
 pub trait ToolPort: Send + Sync {
     /// List all available tools.
@@ -82,6 +105,85 @@ pub trait ToolPort: Send + Sync {
 
     /// Execute a tool call and return its result.
     async fn call_tool(&self, call: ToolCall) -> Result<ToolResult, ToolError>;
+}
+
+#[async_trait::async_trait]
+impl<T> ToolCatalogPort for T
+where
+    T: ToolPort + ?Sized,
+{
+    async fn list_tools(&self) -> Result<Vec<ToolDescriptor>, ToolError> {
+        ToolPort::list_tools(self).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<T> ToolExecutorPort for T
+where
+    T: ToolPort + ?Sized,
+{
+    async fn call_tool(&self, call: ToolCall) -> Result<ToolResult, ToolError> {
+        ToolPort::call_tool(self, call).await
+    }
+}
+
+/// Tool policy decision boundary.
+pub trait ToolPolicyPort: Send + Sync {
+    /// Returns `true` when a tool is allowed for the effective request policy.
+    fn is_tool_allowed(
+        &self,
+        tool: &str,
+        deny_tools: &[String],
+        allow_tools: Option<&[String]>,
+    ) -> bool;
+}
+
+/// Tool call approval boundary for interactive/sensitive operations.
+#[async_trait::async_trait]
+pub trait ApprovalPort: Send + Sync {
+    /// Decide whether the tool call may proceed.
+    async fn approve_tool_call(
+        &self,
+        call: &ToolCall,
+        context: &ApprovalContext,
+    ) -> Result<ApprovalDecision, ToolError>;
+}
+
+/// Port for persisting turn checkpoints.
+#[async_trait::async_trait]
+pub trait TurnCheckpointStorePort: Send + Sync {
+    async fn save_checkpoint(&self, checkpoint: &TurnCheckpoint) -> Result<(), StoreError>;
+    async fn load_latest(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<TurnCheckpoint>, StoreError>;
+}
+
+/// Port for storing per-turn artifacts.
+#[async_trait::async_trait]
+pub trait ArtifactStorePort: Send + Sync {
+    async fn put(&self, artifact: ArtifactRecord) -> Result<(), StoreError>;
+    async fn list_by_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<ArtifactRecord>, StoreError>;
+}
+
+/// Port for cost metering and budget checks.
+#[async_trait::async_trait]
+pub trait CostMeterPort: Send + Sync {
+    async fn check_budget(&self, session_id: &SessionId) -> Result<(), CostError>;
+    async fn record_llm_usage(
+        &self,
+        session_id: &SessionId,
+        model: &str,
+        usage: &TokenUsage,
+    ) -> Result<(), CostError>;
+    async fn record_tool_result(
+        &self,
+        session_id: &SessionId,
+        tool_result: &ToolResult,
+    ) -> Result<(), CostError>;
 }
 
 // ── Session Store ────────────────────────────────────────────────────
@@ -204,6 +306,7 @@ mod tests {
                 content: "Hello!".into(),
                 usage: crate::types::TokenUsage { prompt_tokens: 10, completion_tokens: 5 },
                 finish_reason: crate::types::FinishReason::Stop,
+                tool_calls: Vec::new(),
             },
         });
 

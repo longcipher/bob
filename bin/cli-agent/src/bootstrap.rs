@@ -1,7 +1,12 @@
 use std::sync::Arc;
 
 use bob_adapters::{
+    approval_static::{StaticApprovalMode, StaticApprovalPort},
+    artifact_memory::InMemoryArtifactStore,
+    checkpoint_memory::InMemoryCheckpointStore,
+    cost_simple::SimpleCostMeter,
     observe::TracingEventSink,
+    policy_static::StaticToolPolicyPort,
     skills_agent::{SkillPromptComposer, SkillSelectionPolicy, SkillSourceConfig},
     store_memory::InMemorySessionStore,
 };
@@ -12,8 +17,8 @@ use bob_runtime::{
 use eyre::WrapErr;
 
 use crate::config::{
-    AgentConfig, McpServerEntry, McpTransport, SkillSourceType, SkillsConfig,
-    resolve_env_placeholders,
+    AgentConfig, ApprovalMode, McpServerEntry, McpTransport, RuntimeConfig, RuntimeDispatchMode,
+    SkillSourceType, SkillsConfig, resolve_env_placeholders,
 };
 
 pub(crate) const DEFAULT_TOOL_TIMEOUT_MS: u64 = 15_000;
@@ -62,6 +67,14 @@ pub(crate) async fn build_runtime(
         .with_events(events)
         .with_default_model(cfg.runtime.default_model.clone())
         .with_policy(policy)
+        .with_tool_policy(build_tool_policy_port(cfg))
+        .with_approval(build_approval_port(cfg))
+        .with_dispatch_mode(resolve_dispatch_mode(&cfg.runtime))
+        .with_checkpoint_store(Arc::new(InMemoryCheckpointStore::new()))
+        .with_artifact_store(Arc::new(InMemoryArtifactStore::new()))
+        .with_cost_meter(Arc::new(SimpleCostMeter::new(
+            cfg.cost.as_ref().and_then(|cost| cost.session_token_budget),
+        )))
         .build()
         .wrap_err("failed to build runtime")?;
 
@@ -186,10 +199,66 @@ pub(crate) fn resolve_skills_token_budget(
     Ok(DEFAULT_SKILLS_TOKEN_BUDGET)
 }
 
+pub(crate) fn resolve_dispatch_mode(runtime: &RuntimeConfig) -> bob_runtime::DispatchMode {
+    match runtime.dispatch_mode {
+        Some(RuntimeDispatchMode::PromptGuided) => bob_runtime::DispatchMode::PromptGuided,
+        Some(RuntimeDispatchMode::NativePreferred) | None => {
+            bob_runtime::DispatchMode::NativePreferred
+        }
+    }
+}
+
+pub(crate) fn build_tool_policy_port(
+    cfg: &AgentConfig,
+) -> Arc<dyn bob_adapters::core::ports::ToolPolicyPort> {
+    let deny_tools =
+        cfg.policy.as_ref().and_then(|policy| policy.deny_tools.clone()).unwrap_or_default();
+    let allow_tools = cfg.policy.as_ref().and_then(|policy| policy.allow_tools.clone());
+    let default_deny = cfg.policy.as_ref().and_then(|policy| policy.default_deny).unwrap_or(false);
+
+    Arc::new(StaticToolPolicyPort::new(deny_tools, allow_tools, default_deny))
+}
+
+pub(crate) fn build_approval_port(
+    cfg: &AgentConfig,
+) -> Arc<dyn bob_adapters::core::ports::ApprovalPort> {
+    let mode =
+        cfg.approval.as_ref().and_then(|approval| approval.mode).unwrap_or(ApprovalMode::AllowAll);
+    let mapped_mode = if mode == ApprovalMode::DenyAll {
+        StaticApprovalMode::DenyAll
+    } else {
+        StaticApprovalMode::AllowAll
+    };
+    let deny_tools =
+        cfg.approval.as_ref().and_then(|approval| approval.deny_tools.clone()).unwrap_or_default();
+    Arc::new(StaticApprovalPort::new(mapped_mode, deny_tools))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{RuntimeConfig, SkillSourceEntry};
+    use crate::config::{
+        AgentConfig, ApprovalConfig, ApprovalMode, PolicyConfig, RuntimeConfig,
+        RuntimeDispatchMode, SkillSourceEntry,
+    };
+
+    fn minimal_agent_config() -> AgentConfig {
+        AgentConfig {
+            runtime: RuntimeConfig {
+                default_model: "openai:gpt-4o-mini".to_string(),
+                max_steps: None,
+                turn_timeout_ms: None,
+                model_context_tokens: None,
+                dispatch_mode: None,
+            },
+            llm: None,
+            policy: None,
+            approval: None,
+            mcp: None,
+            skills: None,
+            cost: None,
+        }
+    }
 
     #[test]
     fn resolves_skills_budget_from_ratio() -> eyre::Result<()> {
@@ -198,6 +267,7 @@ mod tests {
             max_steps: Some(12),
             turn_timeout_ms: Some(90_000),
             model_context_tokens: Some(20_000),
+            dispatch_mode: None,
         };
         let skills = SkillsConfig {
             sources: vec![SkillSourceEntry {
@@ -222,6 +292,7 @@ mod tests {
             max_steps: None,
             turn_timeout_ms: None,
             model_context_tokens: None,
+            dispatch_mode: None,
         };
         let skills = SkillsConfig {
             sources: vec![],
@@ -237,5 +308,68 @@ mod tests {
             Ok(value) => format!("unexpected budget: {value}"),
         };
         assert!(msg.contains("token_budget_ratio"));
+    }
+
+    #[test]
+    fn dispatch_mode_defaults_to_native_preferred() {
+        let runtime = RuntimeConfig {
+            default_model: "openai:gpt-4o-mini".to_string(),
+            max_steps: None,
+            turn_timeout_ms: None,
+            model_context_tokens: None,
+            dispatch_mode: None,
+        };
+        let mode = resolve_dispatch_mode(&runtime);
+        assert_eq!(mode, bob_runtime::DispatchMode::NativePreferred);
+    }
+
+    #[test]
+    fn dispatch_mode_prompt_guided_is_resolved() {
+        let runtime = RuntimeConfig {
+            default_model: "openai:gpt-4o-mini".to_string(),
+            max_steps: None,
+            turn_timeout_ms: None,
+            model_context_tokens: None,
+            dispatch_mode: Some(RuntimeDispatchMode::PromptGuided),
+        };
+        let mode = resolve_dispatch_mode(&runtime);
+        assert_eq!(mode, bob_runtime::DispatchMode::PromptGuided);
+    }
+
+    #[test]
+    fn tool_policy_default_deny_blocks_without_allowlist() {
+        let mut cfg = minimal_agent_config();
+        cfg.policy =
+            Some(PolicyConfig { deny_tools: None, allow_tools: None, default_deny: Some(true) });
+
+        let policy_port = build_tool_policy_port(&cfg);
+        assert!(!policy_port.is_tool_allowed("local/read_file", &[], None));
+    }
+
+    #[tokio::test]
+    async fn approval_mode_deny_all_rejects_tool_calls() {
+        let mut cfg = minimal_agent_config();
+        cfg.approval = Some(ApprovalConfig { mode: Some(ApprovalMode::DenyAll), deny_tools: None });
+
+        let approval_port = build_approval_port(&cfg);
+        let decision = approval_port
+            .approve_tool_call(
+                &bob_runtime::core::types::ToolCall {
+                    name: "local/read_file".to_string(),
+                    arguments: Default::default(),
+                },
+                &bob_runtime::core::types::ApprovalContext {
+                    session_id: "s1".to_string(),
+                    turn_step: 1,
+                    selected_skills: Vec::new(),
+                },
+            )
+            .await;
+
+        assert!(decision.is_ok());
+        assert!(matches!(
+            decision.ok(),
+            Some(bob_runtime::core::types::ApprovalDecision::Denied { .. })
+        ));
     }
 }

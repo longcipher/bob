@@ -15,6 +15,12 @@ max_steps = 12
 # Turn timeout in milliseconds (default: 90000 = 90s).
 turn_timeout_ms = 90000
 
+# Dispatch strategy:
+# - "native_preferred" (default): use provider-native tool-calls when available,
+#   fallback to JSON action parsing.
+# - "prompt_guided": always use JSON action parsing protocol.
+# dispatch_mode = "native_preferred"
+
 # Optional context window used for ratio-based skills budgets.
 # model_context_tokens = 128000
 
@@ -24,11 +30,18 @@ turn_timeout_ms = 90000
 # retry_max = 2
 # stream_default = false
 
-# ── Policy (optional, reserved for v2) ───────────────────────────────
+# ── Policy (optional) ─────────────────────────────────────────────────
 
 # [policy]
 # deny_tools = []
 # allow_tools = ["local/read_file"]
+# default_deny = false
+# When true, tools are denied unless they appear in an effective allowlist.
+
+# ── Approval (optional) ───────────────────────────────────────────────
+# [approval]
+# mode = "allow_all" # "allow_all" | "deny_all"
+# deny_tools = ["local/shell_exec"]
 
 # ── MCP Servers (optional) ───────────────────────────────────────────
 # Uncomment and configure to enable tool use via MCP.
@@ -53,3 +66,8 @@ turn_timeout_ms = 90000
 # type = "directory"
 # path = "./skills"
 # recursive = false
+
+# ── Cost Controls (optional) ─────────────────────────────────────────
+# [cost]
+# Optional per-session total token budget.
+# session_token_budget = 10000

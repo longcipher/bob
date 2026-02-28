@@ -43,12 +43,15 @@ use std::sync::Arc;
 
 use bob_core::{
     error::AgentError,
-    is_tool_allowed, normalize_tool_list,
-    ports::{EventSink, LlmPort, SessionStore, ToolPort},
+    normalize_tool_list,
+    ports::{
+        ApprovalPort, ArtifactStorePort, CostMeterPort, EventSink, LlmPort, SessionStore,
+        ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
+    },
     types::{
         AgentAction, AgentEvent, AgentEventStream, AgentRequest, AgentResponse, AgentRunResult,
-        AgentStreamEvent, FinishReason, GuardReason, Message, Role, TokenUsage, ToolCall,
-        ToolResult, TurnPolicy,
+        AgentStreamEvent, ApprovalContext, ApprovalDecision, ArtifactRecord, FinishReason,
+        GuardReason, Message, Role, TokenUsage, ToolCall, ToolResult, TurnCheckpoint, TurnPolicy,
     },
 };
 use futures_util::StreamExt;
@@ -76,10 +79,10 @@ impl LoopGuard {
     /// Returns `true` if the turn may continue executing.
     #[must_use]
     pub fn can_continue(&self) -> bool {
-        self.steps < self.policy.max_steps &&
-            self.tool_calls < self.policy.max_tool_calls &&
-            self.consecutive_errors < self.policy.max_consecutive_errors &&
-            !self.timed_out()
+        self.steps < self.policy.max_steps
+            && self.tool_calls < self.policy.max_tool_calls
+            && self.consecutive_errors < self.policy.max_consecutive_errors
+            && !self.timed_out()
     }
 
     /// Record one scheduler step.
@@ -169,8 +172,44 @@ fn resolve_tool_call_policy(req: &AgentRequest) -> ToolCallPolicy {
     ToolCallPolicy { deny_tools, allow_tools }
 }
 
-fn is_tool_allowed_by_policy(tool: &str, policy: &ToolCallPolicy) -> bool {
-    is_tool_allowed(tool, &policy.deny_tools, policy.allow_tools.as_deref())
+fn prompt_options_for_mode(
+    dispatch_mode: crate::DispatchMode,
+    llm: &dyn LlmPort,
+) -> crate::prompt::PromptBuildOptions {
+    match dispatch_mode {
+        crate::DispatchMode::PromptGuided => crate::prompt::PromptBuildOptions::default(),
+        crate::DispatchMode::NativePreferred => {
+            if llm.capabilities().native_tool_calling {
+                crate::prompt::PromptBuildOptions {
+                    include_action_schema: false,
+                    include_tool_schema: false,
+                }
+            } else {
+                crate::prompt::PromptBuildOptions::default()
+            }
+        }
+    }
+}
+
+fn parse_action_for_mode(
+    dispatch_mode: crate::DispatchMode,
+    llm: &dyn LlmPort,
+    response: &bob_core::types::LlmResponse,
+) -> Result<AgentAction, crate::action::ActionParseError> {
+    match dispatch_mode {
+        crate::DispatchMode::PromptGuided => crate::action::parse_action(&response.content),
+        crate::DispatchMode::NativePreferred => {
+            if llm.capabilities().native_tool_calling {
+                if let Some(tool_call) = response.tool_calls.first() {
+                    return Ok(AgentAction::ToolCall {
+                        name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.clone(),
+                    });
+                }
+            }
+            crate::action::parse_action(&response.content)
+        }
+    }
 }
 
 async fn execute_tool_call(
@@ -178,9 +217,16 @@ async fn execute_tool_call(
     guard: &mut LoopGuard,
     tool_call: ToolCall,
     policy: &ToolCallPolicy,
+    tool_policy_port: &dyn ToolPolicyPort,
+    approval_port: &dyn ApprovalPort,
+    approval_context: &ApprovalContext,
     timeout_ms: u64,
 ) -> ToolResult {
-    if !is_tool_allowed_by_policy(&tool_call.name, policy) {
+    if !tool_policy_port.is_tool_allowed(
+        &tool_call.name,
+        &policy.deny_tools,
+        policy.allow_tools.as_deref(),
+    ) {
         guard.record_error();
         return ToolResult {
             name: tool_call.name.clone(),
@@ -189,6 +235,26 @@ async fn execute_tool_call(
             }),
             is_error: true,
         };
+    }
+
+    match approval_port.approve_tool_call(&tool_call, approval_context).await {
+        Ok(ApprovalDecision::Approved) => {}
+        Ok(ApprovalDecision::Denied { reason }) => {
+            guard.record_error();
+            return ToolResult {
+                name: tool_call.name.clone(),
+                output: serde_json::json!({"error": reason}),
+                is_error: true,
+            };
+        }
+        Err(err) => {
+            guard.record_error();
+            return ToolResult {
+                name: tool_call.name.clone(),
+                output: serde_json::json!({"error": err.to_string()}),
+                is_error: true,
+            };
+        }
     }
 
     match tokio::time::timeout(
@@ -226,7 +292,7 @@ async fn execute_tool_call(
 ///
 /// States: Start → BuildPrompt → LlmInfer → ParseAction → CallTool → Done.
 /// The loop guard guarantees termination under all conditions.
-pub(crate) async fn run_turn(
+pub async fn run_turn(
     llm: &dyn LlmPort,
     tools: &dyn ToolPort,
     store: &dyn SessionStore,
@@ -235,20 +301,92 @@ pub(crate) async fn run_turn(
     policy: &TurnPolicy,
     default_model: &str,
 ) -> Result<AgentRunResult, AgentError> {
+    let tool_policy = crate::DefaultToolPolicyPort;
+    let approval = crate::AllowAllApprovalPort;
+    let checkpoint_store = crate::NoOpCheckpointStorePort;
+    let artifact_store = crate::NoOpArtifactStorePort;
+    let cost_meter = crate::NoOpCostMeterPort;
+    run_turn_with_extensions(
+        llm,
+        tools,
+        store,
+        events,
+        req,
+        policy,
+        default_model,
+        &tool_policy,
+        &approval,
+        crate::DispatchMode::NativePreferred,
+        &checkpoint_store,
+        &artifact_store,
+        &cost_meter,
+    )
+    .await
+}
+
+/// Execute a single turn with explicit policy/approval controls.
+#[allow(dead_code)]
+pub(crate) async fn run_turn_with_controls(
+    llm: &dyn LlmPort,
+    tools: &dyn ToolPort,
+    store: &dyn SessionStore,
+    events: &dyn EventSink,
+    req: AgentRequest,
+    policy: &TurnPolicy,
+    default_model: &str,
+    tool_policy_port: &dyn ToolPolicyPort,
+    approval_port: &dyn ApprovalPort,
+) -> Result<AgentRunResult, AgentError> {
+    let checkpoint_store = crate::NoOpCheckpointStorePort;
+    let artifact_store = crate::NoOpArtifactStorePort;
+    let cost_meter = crate::NoOpCostMeterPort;
+    run_turn_with_extensions(
+        llm,
+        tools,
+        store,
+        events,
+        req,
+        policy,
+        default_model,
+        tool_policy_port,
+        approval_port,
+        crate::DispatchMode::PromptGuided,
+        &checkpoint_store,
+        &artifact_store,
+        &cost_meter,
+    )
+    .await
+}
+
+/// Execute a single turn with all extensibility controls injected.
+pub(crate) async fn run_turn_with_extensions(
+    llm: &dyn LlmPort,
+    tools: &dyn ToolPort,
+    store: &dyn SessionStore,
+    events: &dyn EventSink,
+    req: AgentRequest,
+    policy: &TurnPolicy,
+    default_model: &str,
+    tool_policy_port: &dyn ToolPolicyPort,
+    approval_port: &dyn ApprovalPort,
+    dispatch_mode: crate::DispatchMode,
+    checkpoint_store: &dyn TurnCheckpointStorePort,
+    artifact_store: &dyn ArtifactStorePort,
+    cost_meter: &dyn CostMeterPort,
+) -> Result<AgentRunResult, AgentError> {
     let model = req.model.as_deref().unwrap_or(default_model);
     let cancel_token = req.cancel_token.clone();
     let system_instructions = resolve_system_instructions(&req);
     let selected_skills = resolve_selected_skills(&req);
     let tool_call_policy = resolve_tool_call_policy(&req);
 
-    // ── 1. Start ─────────────────────────────────────────────────
     let mut session = store.load(&req.session_id).await?.unwrap_or_default();
     let tool_descriptors = tools.list_tools().await?;
     let mut guard = LoopGuard::new(policy.clone());
 
     events.emit(AgentEvent::TurnStarted { session_id: req.session_id.clone() });
     if !selected_skills.is_empty() {
-        events.emit(AgentEvent::SkillsSelected { skill_names: selected_skills });
+        events.emit(AgentEvent::SkillsSelected { skill_names: selected_skills.clone() });
     }
 
     session.messages.push(Message { role: Role::User, content: req.input.clone() });
@@ -258,9 +396,8 @@ pub(crate) async fn run_turn(
     let mut consecutive_parse_failures: u32 = 0;
 
     loop {
-        // ── Check cancellation ───────────────────────────────────
-        if let Some(ref token) = cancel_token &&
-            token.is_cancelled()
+        if let Some(ref token) = cancel_token
+            && token.is_cancelled()
         {
             return finish_turn(
                 store,
@@ -277,7 +414,8 @@ pub(crate) async fn run_turn(
             .await;
         }
 
-        // ── Check guard ──────────────────────────────────────────
+        cost_meter.check_budget(&req.session_id).await?;
+
         if !guard.can_continue() {
             let reason = guard.reason();
             let msg = format!("Turn stopped: {reason:?}");
@@ -296,15 +434,14 @@ pub(crate) async fn run_turn(
             .await;
         }
 
-        // ── 2. BuildPrompt ───────────────────────────────────────
-        let llm_request = crate::prompt::build_llm_request(
+        let llm_request = crate::prompt::build_llm_request_with_options(
             model,
             &session,
             &tool_descriptors,
             &system_instructions,
+            prompt_options_for_mode(dispatch_mode, llm),
         );
 
-        // ── 3. LlmInfer ─────────────────────────────────────────
         events.emit(AgentEvent::LlmCallStarted { model: model.to_string() });
 
         let llm_response = if let Some(ref token) = cancel_token {
@@ -324,6 +461,7 @@ pub(crate) async fn run_turn(
         guard.record_step();
         total_usage.prompt_tokens += llm_response.usage.prompt_tokens;
         total_usage.completion_tokens += llm_response.usage.completion_tokens;
+        cost_meter.record_llm_usage(&req.session_id, model, &llm_response.usage).await?;
 
         events.emit(AgentEvent::LlmCallCompleted { usage: llm_response.usage.clone() });
 
@@ -331,11 +469,18 @@ pub(crate) async fn run_turn(
             .messages
             .push(Message { role: Role::Assistant, content: llm_response.content.clone() });
 
-        // ── 4. ParseAction ───────────────────────────────────────
-        match crate::action::parse_action(&llm_response.content) {
+        let _ = checkpoint_store
+            .save_checkpoint(&TurnCheckpoint {
+                session_id: req.session_id.clone(),
+                step: guard.steps,
+                tool_calls: guard.tool_calls,
+                usage: total_usage.clone(),
+            })
+            .await;
+
+        match parse_action_for_mode(dispatch_mode, llm, &llm_response) {
             Ok(action) => {
                 consecutive_parse_failures = 0;
-
                 match action {
                     AgentAction::Final { content } => {
                         return finish_turn(
@@ -368,30 +513,45 @@ pub(crate) async fn run_turn(
                         .await;
                     }
                     AgentAction::ToolCall { name, arguments } => {
-                        // ── 5. CallTool ──────────────────────────
                         events.emit(AgentEvent::ToolCallStarted { name: name.clone() });
+                        let approval_context = ApprovalContext {
+                            session_id: req.session_id.clone(),
+                            turn_step: guard.steps.max(1),
+                            selected_skills: selected_skills.clone(),
+                        };
 
                         let tool_result = execute_tool_call(
                             tools,
                             &mut guard,
                             ToolCall { name: name.clone(), arguments },
                             &tool_call_policy,
+                            tool_policy_port,
+                            approval_port,
+                            &approval_context,
                             policy.tool_timeout_ms,
                         )
                         .await;
 
                         guard.record_tool_call();
+                        let _ = cost_meter.record_tool_result(&req.session_id, &tool_result).await;
 
                         let is_error = tool_result.is_error;
                         events.emit(AgentEvent::ToolCallCompleted { name: name.clone(), is_error });
 
-                        // Append tool result to session as a Tool message.
                         let output_str =
                             serde_json::to_string(&tool_result.output).unwrap_or_default();
                         session.messages.push(Message { role: Role::Tool, content: output_str });
 
+                        let _ = artifact_store
+                            .put(ArtifactRecord {
+                                session_id: req.session_id.clone(),
+                                kind: "tool_result".to_string(),
+                                name: name.clone(),
+                                content: tool_result.output.clone(),
+                            })
+                            .await;
+
                         tool_transcript.push(tool_result);
-                        // Loop back to BuildPrompt.
                     }
                 }
             }
@@ -403,7 +563,6 @@ pub(crate) async fn run_turn(
                         "LLM produced invalid JSON after re-prompt".into(),
                     ));
                 }
-                // Re-prompt: ask the LLM to produce valid JSON.
                 session.messages.push(Message {
                     role: Role::User,
                     content: "Your response was not valid JSON. \
@@ -443,7 +602,7 @@ async fn finish_turn(
 }
 
 /// Execute a single turn in streaming mode and return an event stream.
-pub(crate) async fn run_turn_stream(
+pub async fn run_turn_stream(
     llm: Arc<dyn LlmPort>,
     tools: Arc<dyn ToolPort>,
     store: Arc<dyn SessionStore>,
@@ -452,8 +611,57 @@ pub(crate) async fn run_turn_stream(
     policy: TurnPolicy,
     default_model: String,
 ) -> Result<AgentEventStream, AgentError> {
+    let tool_policy: Arc<dyn ToolPolicyPort> = Arc::new(crate::DefaultToolPolicyPort);
+    let approval: Arc<dyn ApprovalPort> = Arc::new(crate::AllowAllApprovalPort);
+    let checkpoint_store: Arc<dyn TurnCheckpointStorePort> =
+        Arc::new(crate::NoOpCheckpointStorePort);
+    let artifact_store: Arc<dyn ArtifactStorePort> = Arc::new(crate::NoOpArtifactStorePort);
+    let cost_meter: Arc<dyn CostMeterPort> = Arc::new(crate::NoOpCostMeterPort);
+    run_turn_stream_with_controls(
+        llm,
+        tools,
+        store,
+        events,
+        req,
+        policy,
+        default_model,
+        tool_policy,
+        approval,
+        crate::DispatchMode::NativePreferred,
+        checkpoint_store,
+        artifact_store,
+        cost_meter,
+    )
+    .await
+}
+
+/// Execute a single turn in streaming mode with explicit policy/approval controls.
+pub(crate) async fn run_turn_stream_with_controls(
+    llm: Arc<dyn LlmPort>,
+    tools: Arc<dyn ToolPort>,
+    store: Arc<dyn SessionStore>,
+    events: Arc<dyn EventSink>,
+    req: AgentRequest,
+    policy: TurnPolicy,
+    default_model: String,
+    tool_policy: Arc<dyn ToolPolicyPort>,
+    approval: Arc<dyn ApprovalPort>,
+    dispatch_mode: crate::DispatchMode,
+    checkpoint_store: Arc<dyn TurnCheckpointStorePort>,
+    artifact_store: Arc<dyn ArtifactStorePort>,
+    cost_meter: Arc<dyn CostMeterPort>,
+) -> Result<AgentEventStream, AgentError> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentStreamEvent>();
-    let config = StreamRunConfig { policy, default_model };
+    let config = StreamRunConfig {
+        policy,
+        default_model,
+        tool_policy,
+        approval,
+        dispatch_mode,
+        checkpoint_store,
+        artifact_store,
+        cost_meter,
+    };
 
     tokio::spawn(async move {
         if let Err(err) = run_turn_stream_inner(llm, tools, store, events, req, &config, &tx).await
@@ -468,6 +676,12 @@ pub(crate) async fn run_turn_stream(
 struct StreamRunConfig {
     policy: TurnPolicy,
     default_model: String,
+    tool_policy: Arc<dyn ToolPolicyPort>,
+    approval: Arc<dyn ApprovalPort>,
+    dispatch_mode: crate::DispatchMode,
+    checkpoint_store: Arc<dyn TurnCheckpointStorePort>,
+    artifact_store: Arc<dyn ArtifactStorePort>,
+    cost_meter: Arc<dyn CostMeterPort>,
 }
 
 async fn run_turn_stream_inner(
@@ -494,13 +708,13 @@ async fn run_turn_stream_inner(
 
     events.emit(AgentEvent::TurnStarted { session_id: req.session_id.clone() });
     if !selected_skills.is_empty() {
-        events.emit(AgentEvent::SkillsSelected { skill_names: selected_skills });
+        events.emit(AgentEvent::SkillsSelected { skill_names: selected_skills.clone() });
     }
     session.messages.push(Message { role: Role::User, content: req.input.clone() });
 
     loop {
-        if let Some(ref token) = cancel_token &&
-            token.is_cancelled()
+        if let Some(ref token) = cancel_token
+            && token.is_cancelled()
         {
             events.emit(AgentEvent::Error { error: "turn cancelled".to_string() });
             events.emit(AgentEvent::TurnCompleted { finish_reason: FinishReason::Cancelled });
@@ -509,6 +723,8 @@ async fn run_turn_stream_inner(
             let _ = tx.send(AgentStreamEvent::Finished { usage: total_usage.clone() });
             return Ok(());
         }
+
+        config.cost_meter.check_budget(&req.session_id).await?;
 
         if !guard.can_continue() {
             let reason = guard.reason();
@@ -521,16 +737,18 @@ async fn run_turn_stream_inner(
             return Ok(());
         }
 
-        let llm_request = crate::prompt::build_llm_request(
+        let llm_request = crate::prompt::build_llm_request_with_options(
             model,
             &session,
             &tool_descriptors,
             &system_instructions,
+            prompt_options_for_mode(config.dispatch_mode, llm.as_ref()),
         );
         events.emit(AgentEvent::LlmCallStarted { model: model.to_string() });
 
         let mut assistant_content = String::new();
         let mut llm_usage = TokenUsage::default();
+        let mut llm_tool_calls: Vec<ToolCall> = Vec::new();
         let mut fallback_to_complete = false;
 
         match llm.complete_stream(llm_request.clone()).await {
@@ -562,18 +780,39 @@ async fn run_turn_stream_inner(
             let llm_response = llm.complete(llm_request).await?;
             assistant_content = llm_response.content.clone();
             llm_usage = llm_response.usage;
+            llm_tool_calls = llm_response.tool_calls;
             let _ = tx.send(AgentStreamEvent::TextDelta { content: llm_response.content });
         }
 
         guard.record_step();
         total_usage.prompt_tokens += llm_usage.prompt_tokens;
         total_usage.completion_tokens += llm_usage.completion_tokens;
-        events.emit(AgentEvent::LlmCallCompleted { usage: llm_usage });
+        config.cost_meter.record_llm_usage(&req.session_id, model, &llm_usage).await?;
+        events.emit(AgentEvent::LlmCallCompleted { usage: llm_usage.clone() });
         session
             .messages
             .push(Message { role: Role::Assistant, content: assistant_content.clone() });
 
-        if let Ok(action) = crate::action::parse_action(&assistant_content) {
+        let _ = config
+            .checkpoint_store
+            .save_checkpoint(&TurnCheckpoint {
+                session_id: req.session_id.clone(),
+                step: guard.steps,
+                tool_calls: guard.tool_calls,
+                usage: total_usage.clone(),
+            })
+            .await;
+
+        let response_for_dispatch = bob_core::types::LlmResponse {
+            content: assistant_content.clone(),
+            usage: llm_usage.clone(),
+            finish_reason: FinishReason::Stop,
+            tool_calls: llm_tool_calls,
+        };
+
+        if let Ok(action) =
+            parse_action_for_mode(config.dispatch_mode, llm.as_ref(), &response_for_dispatch)
+        {
             consecutive_parse_failures = 0;
             match action {
                 AgentAction::Final { .. } | AgentAction::AskUser { .. } => {
@@ -590,17 +829,27 @@ async fn run_turn_stream_inner(
                         name: name.clone(),
                         call_id: call_id.clone(),
                     });
+                    let approval_context = ApprovalContext {
+                        session_id: req.session_id.clone(),
+                        turn_step: guard.steps.max(1),
+                        selected_skills: selected_skills.clone(),
+                    };
 
                     let tool_result = execute_tool_call(
                         tools.as_ref(),
                         &mut guard,
                         ToolCall { name: name.clone(), arguments },
                         &tool_call_policy,
+                        config.tool_policy.as_ref(),
+                        config.approval.as_ref(),
+                        &approval_context,
                         config.policy.tool_timeout_ms,
                     )
                     .await;
 
                     guard.record_tool_call();
+                    let _ =
+                        config.cost_meter.record_tool_result(&req.session_id, &tool_result).await;
                     let is_error = tool_result.is_error;
                     events.emit(AgentEvent::ToolCallCompleted { name: name.clone(), is_error });
                     let _ = tx.send(AgentStreamEvent::ToolCallCompleted {
@@ -610,6 +859,15 @@ async fn run_turn_stream_inner(
 
                     let output_str = serde_json::to_string(&tool_result.output).unwrap_or_default();
                     session.messages.push(Message { role: Role::Tool, content: output_str });
+                    let _ = config
+                        .artifact_store
+                        .put(ArtifactRecord {
+                            session_id: req.session_id.clone(),
+                            kind: "tool_result".to_string(),
+                            name: name.clone(),
+                            content: tool_result.output.clone(),
+                        })
+                        .await;
                 }
             }
         } else {
@@ -722,12 +980,16 @@ mod tests {
     };
 
     use bob_core::{
-        error::{LlmError, StoreError, ToolError},
-        ports::{EventSink, LlmPort, SessionStore, ToolPort},
+        error::{CostError, LlmError, StoreError, ToolError},
+        ports::{
+            ApprovalPort, ArtifactStorePort, CostMeterPort, EventSink, LlmPort, SessionStore,
+            ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
+        },
         types::{
-            AgentEvent, AgentRequest, AgentRunResult, AgentStreamEvent, CancelToken, LlmRequest,
-            LlmResponse, LlmStream, LlmStreamChunk, SessionId, SessionState, ToolCall,
-            ToolDescriptor, ToolResult, ToolSource,
+            AgentEvent, AgentRequest, AgentRunResult, AgentStreamEvent, ApprovalContext,
+            ApprovalDecision, ArtifactRecord, CancelToken, LlmRequest, LlmResponse, LlmStream,
+            LlmStreamChunk, SessionId, SessionState, ToolCall, ToolDescriptor, ToolResult,
+            ToolSource, TurnCheckpoint,
         },
     };
     use futures_util::StreamExt;
@@ -748,6 +1010,7 @@ mod tests {
                         content: c.to_string(),
                         usage: TokenUsage::default(),
                         finish_reason: FinishReason::Stop,
+                        tool_calls: Vec::new(),
                     })
                 })
                 .collect();
@@ -764,6 +1027,7 @@ mod tests {
                     content: r#"{"type": "final", "content": "fallback"}"#.to_string(),
                     usage: TokenUsage::default(),
                     finish_reason: FinishReason::Stop,
+                    tool_calls: Vec::new(),
                 })
             })
         }
@@ -832,6 +1096,137 @@ mod tests {
             Err(ToolError::Execution(
                 "tool call should be blocked by policy before execution".to_string(),
             ))
+        }
+    }
+
+    struct AllowAllPolicyPort;
+
+    impl ToolPolicyPort for AllowAllPolicyPort {
+        fn is_tool_allowed(
+            &self,
+            _tool: &str,
+            _deny_tools: &[String],
+            _allow_tools: Option<&[String]>,
+        ) -> bool {
+            true
+        }
+    }
+
+    struct DenySearchPolicyPort;
+
+    impl ToolPolicyPort for DenySearchPolicyPort {
+        fn is_tool_allowed(
+            &self,
+            tool: &str,
+            _deny_tools: &[String],
+            _allow_tools: Option<&[String]>,
+        ) -> bool {
+            tool != "search"
+        }
+    }
+
+    struct AlwaysApprovePort;
+
+    #[async_trait::async_trait]
+    impl ApprovalPort for AlwaysApprovePort {
+        async fn approve_tool_call(
+            &self,
+            _call: &ToolCall,
+            _context: &ApprovalContext,
+        ) -> Result<ApprovalDecision, ToolError> {
+            Ok(ApprovalDecision::Approved)
+        }
+    }
+
+    struct AlwaysDenyApprovalPort;
+
+    #[async_trait::async_trait]
+    impl ApprovalPort for AlwaysDenyApprovalPort {
+        async fn approve_tool_call(
+            &self,
+            _call: &ToolCall,
+            _context: &ApprovalContext,
+        ) -> Result<ApprovalDecision, ToolError> {
+            Ok(ApprovalDecision::Denied {
+                reason: "approval policy rejected tool call".to_string(),
+            })
+        }
+    }
+
+    struct CountingCheckpointPort {
+        saved: Mutex<Vec<TurnCheckpoint>>,
+    }
+
+    impl CountingCheckpointPort {
+        fn new() -> Self {
+            Self { saved: Mutex::new(Vec::new()) }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TurnCheckpointStorePort for CountingCheckpointPort {
+        async fn save_checkpoint(&self, checkpoint: &TurnCheckpoint) -> Result<(), StoreError> {
+            self.saved.lock().unwrap_or_else(|p| p.into_inner()).push(checkpoint.clone());
+            Ok(())
+        }
+
+        async fn load_latest(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<Option<TurnCheckpoint>, StoreError> {
+            Ok(None)
+        }
+    }
+
+    struct NoopArtifactStore;
+
+    #[async_trait::async_trait]
+    impl ArtifactStorePort for NoopArtifactStore {
+        async fn put(&self, _artifact: ArtifactRecord) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        async fn list_by_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<Vec<ArtifactRecord>, StoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct CountingCostMeter {
+        llm_calls: Mutex<u32>,
+    }
+
+    impl CountingCostMeter {
+        fn new() -> Self {
+            Self { llm_calls: Mutex::new(0) }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CostMeterPort for CountingCostMeter {
+        async fn check_budget(&self, _session_id: &SessionId) -> Result<(), CostError> {
+            Ok(())
+        }
+
+        async fn record_llm_usage(
+            &self,
+            _session_id: &SessionId,
+            _model: &str,
+            _usage: &TokenUsage,
+        ) -> Result<(), CostError> {
+            let mut count = self.llm_calls.lock().unwrap_or_else(|p| p.into_inner());
+            *count += 1;
+            Ok(())
+        }
+
+        async fn record_tool_result(
+            &self,
+            _session_id: &SessionId,
+            _tool_result: &ToolResult,
+        ) -> Result<(), CostError> {
+            Ok(())
         }
     }
 
@@ -962,6 +1357,7 @@ mod tests {
                 content: r#"{"type": "final", "content": "ok"}"#.to_string(),
                 usage: TokenUsage::default(),
                 finish_reason: FinishReason::Stop,
+                tool_calls: Vec::new(),
             })
         }
 
@@ -1310,9 +1706,9 @@ mod tests {
                     assert_eq!(usage.prompt_tokens, 3);
                     assert_eq!(usage.completion_tokens, 4);
                 }
-                AgentStreamEvent::ToolCallStarted { .. } |
-                AgentStreamEvent::ToolCallCompleted { .. } |
-                AgentStreamEvent::Error { .. } => {}
+                AgentStreamEvent::ToolCallStarted { .. }
+                | AgentStreamEvent::ToolCallCompleted { .. }
+                | AgentStreamEvent::Error { .. } => {}
             }
         }
 
@@ -1401,5 +1797,220 @@ mod tests {
             resp.tool_transcript[0].output.to_string().contains("denied"),
             "tool error should explain policy denial"
         );
+    }
+
+    #[tokio::test]
+    async fn tc13_approval_denied_blocks_execution() {
+        let llm = SequentialLlm::from_contents(vec![
+            r#"{"type": "tool_call", "name": "search", "arguments": {"q": "rust"}}"#,
+            r#"{"type": "final", "content": "done"}"#,
+        ]);
+        let tools = NoCallToolPort {
+            tools: vec![ToolDescriptor {
+                id: "search".to_string(),
+                description: "search tool".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+                source: ToolSource::Local,
+            }],
+        };
+        let store = MemoryStore::new();
+        let sink = CollectingSink::new();
+        let req = make_request("search rust");
+        let tool_policy = AllowAllPolicyPort;
+        let approval = AlwaysDenyApprovalPort;
+
+        let result = run_turn_with_controls(
+            &llm,
+            &tools,
+            &store,
+            &sink,
+            req,
+            &generous_policy(),
+            "test-model",
+            &tool_policy,
+            &approval,
+        )
+        .await;
+        assert!(matches!(&result, Ok(AgentRunResult::Finished(_))), "unexpected result {result:?}");
+        let resp = match result {
+            Ok(AgentRunResult::Finished(r)) => r,
+            _ => return,
+        };
+
+        assert_eq!(resp.tool_transcript.len(), 1);
+        assert!(resp.tool_transcript[0].is_error);
+        assert!(
+            resp.tool_transcript[0].output.to_string().contains("approval policy rejected"),
+            "tool error should explain approval denial"
+        );
+    }
+
+    #[tokio::test]
+    async fn tc14_custom_policy_port_blocks_execution() {
+        let llm = SequentialLlm::from_contents(vec![
+            r#"{"type": "tool_call", "name": "search", "arguments": {"q": "rust"}}"#,
+            r#"{"type": "final", "content": "done"}"#,
+        ]);
+        let tools = NoCallToolPort {
+            tools: vec![ToolDescriptor {
+                id: "search".to_string(),
+                description: "search tool".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+                source: ToolSource::Local,
+            }],
+        };
+        let store = MemoryStore::new();
+        let sink = CollectingSink::new();
+        let req = make_request("search rust");
+        let tool_policy = DenySearchPolicyPort;
+        let approval = AlwaysApprovePort;
+
+        let result = run_turn_with_controls(
+            &llm,
+            &tools,
+            &store,
+            &sink,
+            req,
+            &generous_policy(),
+            "test-model",
+            &tool_policy,
+            &approval,
+        )
+        .await;
+        assert!(matches!(&result, Ok(AgentRunResult::Finished(_))), "unexpected result {result:?}");
+        let resp = match result {
+            Ok(AgentRunResult::Finished(r)) => r,
+            _ => return,
+        };
+
+        assert_eq!(resp.tool_transcript.len(), 1);
+        assert!(resp.tool_transcript[0].is_error);
+        assert!(
+            resp.tool_transcript[0].output.to_string().contains("denied"),
+            "tool error should explain policy denial"
+        );
+    }
+
+    #[tokio::test]
+    async fn tc15_native_dispatch_mode_uses_llm_tool_calls() {
+        struct NativeToolLlm {
+            responses: Mutex<VecDeque<LlmResponse>>,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmPort for NativeToolLlm {
+            fn capabilities(&self) -> bob_core::types::LlmCapabilities {
+                bob_core::types::LlmCapabilities { native_tool_calling: true, streaming: true }
+            }
+
+            async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, LlmError> {
+                let mut q = self.responses.lock().unwrap_or_else(|p| p.into_inner());
+                Ok(q.pop_front().unwrap_or(LlmResponse {
+                    content: r#"{"type":"final","content":"fallback"}"#.to_string(),
+                    usage: TokenUsage::default(),
+                    finish_reason: FinishReason::Stop,
+                    tool_calls: Vec::new(),
+                }))
+            }
+
+            async fn complete_stream(&self, _req: LlmRequest) -> Result<LlmStream, LlmError> {
+                Err(LlmError::Provider("not used".into()))
+            }
+        }
+
+        let llm = NativeToolLlm {
+            responses: Mutex::new(VecDeque::from(vec![
+                LlmResponse {
+                    content: "ignored".to_string(),
+                    usage: TokenUsage::default(),
+                    finish_reason: FinishReason::Stop,
+                    tool_calls: vec![ToolCall {
+                        name: "search".to_string(),
+                        arguments: serde_json::json!({"q":"rust"}),
+                    }],
+                },
+                LlmResponse {
+                    content: r#"{"type":"final","content":"done"}"#.to_string(),
+                    usage: TokenUsage::default(),
+                    finish_reason: FinishReason::Stop,
+                    tool_calls: Vec::new(),
+                },
+            ])),
+        };
+        let tools = MockToolPort::with_tool_and_results(
+            "search",
+            vec![Ok(ToolResult {
+                name: "search".to_string(),
+                output: serde_json::json!({"hits": 2}),
+                is_error: false,
+            })],
+        );
+        let store = MemoryStore::new();
+        let sink = CollectingSink::new();
+        let checkpoint = CountingCheckpointPort::new();
+        let artifacts = NoopArtifactStore;
+        let cost = CountingCostMeter::new();
+        let policy = AllowAllPolicyPort;
+        let approval = AlwaysApprovePort;
+
+        let result = run_turn_with_extensions(
+            &llm,
+            &tools,
+            &store,
+            &sink,
+            make_request("search rust"),
+            &generous_policy(),
+            "test-model",
+            &policy,
+            &approval,
+            crate::DispatchMode::NativePreferred,
+            &checkpoint,
+            &artifacts,
+            &cost,
+        )
+        .await;
+
+        assert!(matches!(&result, Ok(AgentRunResult::Finished(_))), "unexpected {result:?}");
+        let resp = match result {
+            Ok(AgentRunResult::Finished(r)) => r,
+            _ => return,
+        };
+        assert_eq!(resp.tool_transcript.len(), 1);
+        assert_eq!(resp.tool_transcript[0].name, "search");
+    }
+
+    #[tokio::test]
+    async fn tc16_checkpoint_and_cost_ports_are_invoked() {
+        let llm = SequentialLlm::from_contents(vec![r#"{"type": "final", "content": "ok"}"#]);
+        let tools = MockToolPort::empty();
+        let store = MemoryStore::new();
+        let sink = CollectingSink::new();
+        let checkpoint = CountingCheckpointPort::new();
+        let artifacts = NoopArtifactStore;
+        let cost = CountingCostMeter::new();
+        let policy = AllowAllPolicyPort;
+        let approval = AlwaysApprovePort;
+
+        let result = run_turn_with_extensions(
+            &llm,
+            &tools,
+            &store,
+            &sink,
+            make_request("hello"),
+            &generous_policy(),
+            "test-model",
+            &policy,
+            &approval,
+            crate::DispatchMode::PromptGuided,
+            &checkpoint,
+            &artifacts,
+            &cost,
+        )
+        .await;
+        assert!(result.is_ok(), "turn should succeed");
+        let checkpoints = checkpoint.saved.lock().unwrap_or_else(|p| p.into_inner()).len();
+        let llm_calls = *cost.llm_calls.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(checkpoints >= 1, "checkpoint port should be invoked at least once");
+        assert!(llm_calls >= 1, "cost meter should record llm usage");
     }
 }

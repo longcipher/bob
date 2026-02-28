@@ -13,6 +13,8 @@ Adapter implementations for the [Bob Agent Framework](https://github.com/longcip
 - **LLM Adapters**: Connect to language models via various providers
 - **Tool Adapters**: Integrate with external tools and MCP servers
 - **Storage Adapters**: Persist session state
+- **Runtime Extension Adapters**: Checkpoints, artifacts, and cost metering
+- **Runtime Guardrail Adapters**: Tool policy and approval adapters
 - **Observability Adapters**: Log and monitor agent events
 
 ## Features
@@ -115,6 +117,17 @@ In-memory session storage for development and testing:
 - Fast in-process storage
 - No external dependencies
 - Suitable for single-instance deployments
+
+### Runtime Extension Adapters
+
+- `checkpoint_memory::InMemoryCheckpointStore`: per-session turn checkpoints
+- `artifact_memory::InMemoryArtifactStore`: per-session tool-result artifacts
+- `cost_simple::SimpleCostMeter`: optional per-session token budget enforcement
+
+### Runtime Guardrail Adapters
+
+- `policy_static::StaticToolPolicyPort`: merges runtime/request allow/deny lists
+- `approval_static::StaticApprovalPort`: supports `allow_all` or `deny_all` plus tool denylist
 
 ### Observability (`observe-tracing`)
 

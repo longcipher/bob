@@ -1,6 +1,6 @@
 ---
 name: pb-init
-description: "Use when onboarding a repo or after major structural changes to regenerate AGENTS.md project context."
+description: "Use to audit the repo and produce a minimal AGENTS.md containing only undiscoverable gotchas, hard constraints, and non-obvious conventions."
 ---
 
 # pb-init — Project Initialization

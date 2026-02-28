@@ -72,8 +72,11 @@ pub mod types;
 
 // ── Re-exports ───────────────────────────────────────────────────────
 
-pub use error::{AgentError, LlmError, StoreError, ToolError};
-pub use ports::{EventSink, LlmPort, SessionStore, ToolPort};
+pub use error::{AgentError, CostError, LlmError, StoreError, ToolError};
+pub use ports::{
+    ApprovalPort, ArtifactStorePort, CostMeterPort, EventSink, LlmPort, SessionStore,
+    ToolCatalogPort, ToolExecutorPort, ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
+};
 pub use tool_policy::{
     intersect_allowlists, is_tool_allowed, merge_allowlists, normalize_tool_list, tools_match,
 };

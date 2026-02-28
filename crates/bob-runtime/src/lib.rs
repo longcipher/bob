@@ -87,13 +87,122 @@ use std::sync::Arc;
 
 pub use bob_core as core;
 use bob_core::{
-    error::AgentError,
-    ports::{EventSink, LlmPort, SessionStore, ToolPort},
+    error::{AgentError, CostError, StoreError, ToolError},
+    ports::{
+        ApprovalPort, ArtifactStorePort, CostMeterPort, EventSink, LlmPort, SessionStore,
+        ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
+    },
     types::{
-        AgentEventStream, AgentRequest, AgentRunResult, HealthStatus, RuntimeHealth, TurnPolicy,
+        AgentEventStream, AgentRequest, AgentRunResult, ApprovalContext, ApprovalDecision,
+        ArtifactRecord, HealthStatus, RuntimeHealth, SessionId, ToolCall, ToolResult,
+        TurnCheckpoint, TurnPolicy,
     },
 };
 pub use tooling::{NoOpToolPort, TimeoutToolLayer, ToolLayer};
+
+/// Action dispatch mode for model responses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DispatchMode {
+    /// Use prompt-guided JSON action protocol only.
+    PromptGuided,
+    /// Prefer native provider tool calls when available, fallback to prompt-guided parsing.
+    #[default]
+    NativePreferred,
+}
+
+/// Default static policy implementation backed by `bob-core` tool matching helpers.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DefaultToolPolicyPort;
+
+impl ToolPolicyPort for DefaultToolPolicyPort {
+    fn is_tool_allowed(
+        &self,
+        tool: &str,
+        deny_tools: &[String],
+        allow_tools: Option<&[String]>,
+    ) -> bool {
+        bob_core::is_tool_allowed(tool, deny_tools, allow_tools)
+    }
+}
+
+/// Default approval implementation that allows every tool call.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AllowAllApprovalPort;
+
+#[async_trait::async_trait]
+impl ApprovalPort for AllowAllApprovalPort {
+    async fn approve_tool_call(
+        &self,
+        _call: &ToolCall,
+        _context: &ApprovalContext,
+    ) -> Result<ApprovalDecision, ToolError> {
+        Ok(ApprovalDecision::Approved)
+    }
+}
+
+/// Default checkpoint store that drops all checkpoints.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct NoOpCheckpointStorePort;
+
+#[async_trait::async_trait]
+impl TurnCheckpointStorePort for NoOpCheckpointStorePort {
+    async fn save_checkpoint(&self, _checkpoint: &TurnCheckpoint) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn load_latest(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<TurnCheckpoint>, StoreError> {
+        Ok(None)
+    }
+}
+
+/// Default artifact store that drops all artifacts.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct NoOpArtifactStorePort;
+
+#[async_trait::async_trait]
+impl ArtifactStorePort for NoOpArtifactStorePort {
+    async fn put(&self, _artifact: ArtifactRecord) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn list_by_session(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Vec<ArtifactRecord>, StoreError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Default cost meter that never blocks and records nothing.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct NoOpCostMeterPort;
+
+#[async_trait::async_trait]
+impl CostMeterPort for NoOpCostMeterPort {
+    async fn check_budget(&self, _session_id: &SessionId) -> Result<(), CostError> {
+        Ok(())
+    }
+
+    async fn record_llm_usage(
+        &self,
+        _session_id: &SessionId,
+        _model: &str,
+        _usage: &bob_core::types::TokenUsage,
+    ) -> Result<(), CostError> {
+        Ok(())
+    }
+
+    async fn record_tool_result(
+        &self,
+        _session_id: &SessionId,
+        _tool_result: &ToolResult,
+    ) -> Result<(), CostError> {
+        Ok(())
+    }
+}
 
 // ── Bootstrap / Builder ───────────────────────────────────────────────
 
@@ -117,6 +226,12 @@ pub struct RuntimeBuilder {
     default_model: Option<String>,
     policy: TurnPolicy,
     tool_layers: Vec<Arc<dyn ToolLayer>>,
+    tool_policy: Option<Arc<dyn ToolPolicyPort>>,
+    approval: Option<Arc<dyn ApprovalPort>>,
+    dispatch_mode: DispatchMode,
+    checkpoint_store: Option<Arc<dyn TurnCheckpointStorePort>>,
+    artifact_store: Option<Arc<dyn ArtifactStorePort>>,
+    cost_meter: Option<Arc<dyn CostMeterPort>>,
 }
 
 impl std::fmt::Debug for RuntimeBuilder {
@@ -129,6 +244,12 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("default_model", &self.default_model)
             .field("policy", &self.policy)
             .field("tool_layers", &self.tool_layers.len())
+            .field("has_tool_policy", &self.tool_policy.is_some())
+            .field("has_approval", &self.approval.is_some())
+            .field("dispatch_mode", &self.dispatch_mode)
+            .field("has_checkpoint_store", &self.checkpoint_store.is_some())
+            .field("has_artifact_store", &self.artifact_store.is_some())
+            .field("has_cost_meter", &self.cost_meter.is_some())
             .finish()
     }
 }
@@ -176,6 +297,45 @@ impl RuntimeBuilder {
     }
 
     #[must_use]
+    pub fn with_tool_policy(mut self, tool_policy: Arc<dyn ToolPolicyPort>) -> Self {
+        self.tool_policy = Some(tool_policy);
+        self
+    }
+
+    #[must_use]
+    pub fn with_approval(mut self, approval: Arc<dyn ApprovalPort>) -> Self {
+        self.approval = Some(approval);
+        self
+    }
+
+    #[must_use]
+    pub fn with_dispatch_mode(mut self, dispatch_mode: DispatchMode) -> Self {
+        self.dispatch_mode = dispatch_mode;
+        self
+    }
+
+    #[must_use]
+    pub fn with_checkpoint_store(
+        mut self,
+        checkpoint_store: Arc<dyn TurnCheckpointStorePort>,
+    ) -> Self {
+        self.checkpoint_store = Some(checkpoint_store);
+        self
+    }
+
+    #[must_use]
+    pub fn with_artifact_store(mut self, artifact_store: Arc<dyn ArtifactStorePort>) -> Self {
+        self.artifact_store = Some(artifact_store);
+        self
+    }
+
+    #[must_use]
+    pub fn with_cost_meter(mut self, cost_meter: Arc<dyn CostMeterPort>) -> Self {
+        self.cost_meter = Some(cost_meter);
+        self
+    }
+
+    #[must_use]
     pub fn add_tool_layer(mut self, layer: Arc<dyn ToolLayer>) -> Self {
         self.tool_layers.push(layer);
         self
@@ -190,6 +350,22 @@ impl RuntimeBuilder {
         let default_model = self
             .default_model
             .ok_or_else(|| AgentError::Config("missing default model".to_string()))?;
+        let tool_policy: Arc<dyn ToolPolicyPort> = self
+            .tool_policy
+            .unwrap_or_else(|| Arc::new(DefaultToolPolicyPort) as Arc<dyn ToolPolicyPort>);
+        let approval: Arc<dyn ApprovalPort> = self
+            .approval
+            .unwrap_or_else(|| Arc::new(AllowAllApprovalPort) as Arc<dyn ApprovalPort>);
+        let checkpoint_store: Arc<dyn TurnCheckpointStorePort> =
+            self.checkpoint_store.unwrap_or_else(|| {
+                Arc::new(NoOpCheckpointStorePort) as Arc<dyn TurnCheckpointStorePort>
+            });
+        let artifact_store: Arc<dyn ArtifactStorePort> = self
+            .artifact_store
+            .unwrap_or_else(|| Arc::new(NoOpArtifactStorePort) as Arc<dyn ArtifactStorePort>);
+        let cost_meter: Arc<dyn CostMeterPort> = self
+            .cost_meter
+            .unwrap_or_else(|| Arc::new(NoOpCostMeterPort) as Arc<dyn CostMeterPort>);
 
         let mut tools: Arc<dyn ToolPort> =
             self.tools.unwrap_or_else(|| Arc::new(NoOpToolPort) as Arc<dyn ToolPort>);
@@ -197,8 +373,20 @@ impl RuntimeBuilder {
             tools = layer.wrap(tools);
         }
 
-        let rt =
-            DefaultAgentRuntime { llm, tools, store, events, default_model, policy: self.policy };
+        let rt = DefaultAgentRuntime {
+            llm,
+            tools,
+            store,
+            events,
+            default_model,
+            policy: self.policy,
+            tool_policy,
+            approval,
+            dispatch_mode: self.dispatch_mode,
+            checkpoint_store,
+            artifact_store,
+            cost_meter,
+        };
         Ok(Arc::new(rt))
     }
 }
@@ -237,6 +425,12 @@ pub struct DefaultAgentRuntime {
     pub events: Arc<dyn EventSink>,
     pub default_model: String,
     pub policy: TurnPolicy,
+    pub tool_policy: Arc<dyn ToolPolicyPort>,
+    pub approval: Arc<dyn ApprovalPort>,
+    pub dispatch_mode: DispatchMode,
+    pub checkpoint_store: Arc<dyn TurnCheckpointStorePort>,
+    pub artifact_store: Arc<dyn ArtifactStorePort>,
+    pub cost_meter: Arc<dyn CostMeterPort>,
 }
 
 impl std::fmt::Debug for DefaultAgentRuntime {
@@ -248,7 +442,7 @@ impl std::fmt::Debug for DefaultAgentRuntime {
 #[async_trait::async_trait]
 impl AgentRuntime for DefaultAgentRuntime {
     async fn run(&self, req: AgentRequest) -> Result<AgentRunResult, AgentError> {
-        scheduler::run_turn(
+        scheduler::run_turn_with_extensions(
             self.llm.as_ref(),
             self.tools.as_ref(),
             self.store.as_ref(),
@@ -256,12 +450,18 @@ impl AgentRuntime for DefaultAgentRuntime {
             req,
             &self.policy,
             &self.default_model,
+            self.tool_policy.as_ref(),
+            self.approval.as_ref(),
+            self.dispatch_mode,
+            self.checkpoint_store.as_ref(),
+            self.artifact_store.as_ref(),
+            self.cost_meter.as_ref(),
         )
         .await
     }
 
     async fn run_stream(&self, req: AgentRequest) -> Result<AgentEventStream, AgentError> {
-        scheduler::run_turn_stream(
+        scheduler::run_turn_stream_with_controls(
             self.llm.clone(),
             self.tools.clone(),
             self.store.clone(),
@@ -269,6 +469,12 @@ impl AgentRuntime for DefaultAgentRuntime {
             req,
             self.policy.clone(),
             self.default_model.clone(),
+            self.tool_policy.clone(),
+            self.approval.clone(),
+            self.dispatch_mode,
+            self.checkpoint_store.clone(),
+            self.artifact_store.clone(),
+            self.cost_meter.clone(),
         )
         .await
     }
@@ -302,6 +508,7 @@ mod tests {
                 content: r#"{"type": "final", "content": "stub response"}"#.into(),
                 usage: TokenUsage::default(),
                 finish_reason: FinishReason::Stop,
+                tool_calls: Vec::new(),
             })
         }
 
@@ -356,6 +563,12 @@ mod tests {
             events: Arc::new(StubSink { count: Mutex::new(0) }),
             default_model: "test-model".into(),
             policy: TurnPolicy::default(),
+            tool_policy: Arc::new(DefaultToolPolicyPort),
+            approval: Arc::new(AllowAllApprovalPort),
+            dispatch_mode: DispatchMode::PromptGuided,
+            checkpoint_store: Arc::new(NoOpCheckpointStorePort),
+            artifact_store: Arc::new(NoOpArtifactStorePort),
+            cost_meter: Arc::new(NoOpCostMeterPort),
         });
 
         let req = AgentRequest {
@@ -386,6 +599,12 @@ mod tests {
             events: Arc::new(StubSink { count: Mutex::new(0) }),
             default_model: "test-model".into(),
             policy: TurnPolicy::default(),
+            tool_policy: Arc::new(DefaultToolPolicyPort),
+            approval: Arc::new(AllowAllApprovalPort),
+            dispatch_mode: DispatchMode::PromptGuided,
+            checkpoint_store: Arc::new(NoOpCheckpointStorePort),
+            artifact_store: Arc::new(NoOpArtifactStorePort),
+            cost_meter: Arc::new(NoOpCostMeterPort),
         };
 
         let health = rt.health().await;

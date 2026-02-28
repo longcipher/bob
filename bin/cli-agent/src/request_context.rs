@@ -56,6 +56,7 @@ mod tests {
         let policy = PolicyConfig {
             deny_tools: Some(vec!["local/shell_exec".to_string()]),
             allow_tools: Some(vec!["local/read_file".to_string()]),
+            default_deny: None,
         };
 
         let ctx = build_request_context("hello", None, Some(&policy));

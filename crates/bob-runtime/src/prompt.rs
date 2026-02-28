@@ -33,6 +33,19 @@ use bob_core::types::{LlmRequest, Message, Role, SessionState, ToolDescriptor};
 /// Maximum number of non-system history messages to keep.
 const MAX_HISTORY: usize = 50;
 
+/// Options controlling prompt shape for different dispatch strategies.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PromptBuildOptions {
+    pub include_action_schema: bool,
+    pub include_tool_schema: bool,
+}
+
+impl Default for PromptBuildOptions {
+    fn default() -> Self {
+        Self { include_action_schema: true, include_tool_schema: true }
+    }
+}
+
 /// Returns the JSON action-schema contract text (design doc §8.3.1).
 pub(crate) fn action_schema_prompt() -> String {
     r#"You must respond with exactly one JSON object and no extra text.
@@ -71,18 +84,39 @@ pub(crate) fn tool_schema_block(tools: &[ToolDescriptor]) -> String {
 ///   1. System message = core instructions + action schema + tool schemas
 ///   2. Session history (truncated to most recent 50 non-system messages)
 ///   3. `LlmRequest { model, messages, tools }`
+#[allow(dead_code)]
 pub(crate) fn build_llm_request(
     model: &str,
     session: &SessionState,
     tools: &[ToolDescriptor],
     system_instructions: &str,
 ) -> LlmRequest {
+    build_llm_request_with_options(
+        model,
+        session,
+        tools,
+        system_instructions,
+        PromptBuildOptions::default(),
+    )
+}
+
+/// Assembles an `LlmRequest` with configurable schema/tool prompt sections.
+pub(crate) fn build_llm_request_with_options(
+    model: &str,
+    session: &SessionState,
+    tools: &[ToolDescriptor],
+    system_instructions: &str,
+    options: PromptBuildOptions,
+) -> LlmRequest {
     // -- system message --------------------------------------------------
     let mut system_content = system_instructions.to_string();
-    system_content.push_str("\n\n");
-    system_content.push_str(&action_schema_prompt());
+    if options.include_action_schema {
+        system_content.push_str("\n\n");
+        system_content.push_str(&action_schema_prompt());
+    }
 
-    let tool_block = tool_schema_block(tools);
+    let tool_block =
+        if options.include_tool_schema { tool_schema_block(tools) } else { String::new() };
     if !tool_block.is_empty() {
         system_content.push_str("\n\n");
         system_content.push_str(&tool_block);

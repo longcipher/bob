@@ -42,6 +42,7 @@ Create an `agent.toml` file in the project root:
 default_model = "openai:gpt-4o-mini"
 max_steps = 12
 turn_timeout_ms = 90000
+dispatch_mode = "native_preferred"
 
 # Optional: Configure MCP servers
 [mcp]
@@ -65,7 +66,19 @@ recursive = false
 [policy]
 deny_tools = ["local/shell_exec"]
 allow_tools = ["local/read_file", "local/write_file"]
+default_deny = false
+
+# Optional: Configure approval guardrails
+[approval]
+mode = "allow_all"
+deny_tools = ["local/shell_exec"]
+
+# Optional: Configure per-session token budget
+[cost]
+session_token_budget = 10000
 ```
+
+`dispatch_mode` supports `native_preferred` and `prompt_guided`.
 
 ### Environment Variables
 

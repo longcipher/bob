@@ -50,6 +50,9 @@ pub enum AgentError {
     #[error("Store error: {0}")]
     Store(#[from] StoreError),
 
+    #[error("Cost meter error: {0}")]
+    Cost(#[from] CostError),
+
     #[error("timeout")]
     Timeout,
 
@@ -102,6 +105,19 @@ pub enum StoreError {
     Serialization(String),
 
     #[error("storage backend error: {0}")]
+    Backend(String),
+
+    #[error(transparent)]
+    Other(#[from] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// Cost meter errors.
+#[derive(thiserror::Error, Debug)]
+pub enum CostError {
+    #[error("budget exceeded: {0}")]
+    BudgetExceeded(String),
+
+    #[error("cost backend error: {0}")]
     Backend(String),
 
     #[error(transparent)]

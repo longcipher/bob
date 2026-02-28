@@ -161,6 +161,8 @@ pub struct LlmResponse {
     pub usage: TokenUsage,
     /// Why the model stopped.
     pub finish_reason: FinishReason,
+    /// Native tool calls emitted by providers that support structured calls.
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// A streaming LLM response.
@@ -172,6 +174,21 @@ pub type LlmStream =
 pub enum LlmStreamChunk {
     TextDelta(String),
     Done { usage: TokenUsage },
+}
+
+/// Declares what an LLM adapter supports at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmCapabilities {
+    /// Whether this provider supports native tool calling payloads.
+    pub native_tool_calling: bool,
+    /// Whether this provider supports streaming responses.
+    pub streaming: bool,
+}
+
+impl Default for LlmCapabilities {
+    fn default() -> Self {
+        Self { native_tool_calling: false, streaming: true }
+    }
 }
 
 // ── Message History ──────────────────────────────────────────────────
@@ -269,6 +286,43 @@ pub enum GuardReason {
     MaxConsecutiveErrors,
     TurnTimeout,
     Cancelled,
+}
+
+/// Additional context passed to approval checks for one tool call.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApprovalContext {
+    /// Session identifier for correlation and policy rules.
+    pub session_id: SessionId,
+    /// 1-based LLM step index in the current turn.
+    pub turn_step: u32,
+    /// Selected skills for this request.
+    pub selected_skills: Vec<String>,
+}
+
+/// Outcome of a tool approval decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    Approved,
+    Denied { reason: String },
+}
+
+/// Snapshot of turn progress for suspend/resume and diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnCheckpoint {
+    pub session_id: SessionId,
+    pub step: u32,
+    pub tool_calls: u32,
+    pub usage: TokenUsage,
+}
+
+/// Stored artifact created during a turn (e.g. tool output).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactRecord {
+    pub session_id: SessionId,
+    pub kind: String,
+    pub name: String,
+    pub content: serde_json::Value,
 }
 
 /// Turn execution policy with guard limits.

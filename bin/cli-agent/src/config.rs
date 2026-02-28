@@ -11,8 +11,10 @@ pub(crate) struct AgentConfig {
     #[expect(dead_code, reason = "reserved for v2 LLM retry/stream config")]
     pub llm: Option<LlmConfig>,
     pub policy: Option<PolicyConfig>,
+    pub approval: Option<ApprovalConfig>,
     pub mcp: Option<McpConfig>,
     pub skills: Option<SkillsConfig>,
+    pub cost: Option<CostConfig>,
 }
 
 /// Core runtime settings.
@@ -26,6 +28,16 @@ pub(crate) struct RuntimeConfig {
     pub turn_timeout_ms: Option<u64>,
     /// Model context size in tokens for budget ratio calculations.
     pub model_context_tokens: Option<usize>,
+    /// Dispatch strategy for model action extraction.
+    pub dispatch_mode: Option<RuntimeDispatchMode>,
+}
+
+/// Runtime dispatch mode.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RuntimeDispatchMode {
+    PromptGuided,
+    NativePreferred,
 }
 
 /// LLM-specific settings.
@@ -45,6 +57,25 @@ pub(crate) struct PolicyConfig {
     pub deny_tools: Option<Vec<String>>,
     /// Tool names allowed by runtime policy.
     pub allow_tools: Option<Vec<String>>,
+    /// Deny tool calls when neither runtime nor request allowlist is provided.
+    pub default_deny: Option<bool>,
+}
+
+/// Approval policy configuration.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ApprovalConfig {
+    /// Approval mode.
+    pub mode: Option<ApprovalMode>,
+    /// Tool names denied by approval policy in allow-all mode.
+    pub deny_tools: Option<Vec<String>>,
+}
+
+/// Supported approval modes.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ApprovalMode {
+    AllowAll,
+    DenyAll,
 }
 
 /// MCP server configuration.
@@ -79,6 +110,13 @@ pub(crate) struct SkillsConfig {
     pub max_selected: Option<usize>,
     pub token_budget_tokens: Option<usize>,
     pub token_budget_ratio: Option<f64>,
+}
+
+/// Cost control configuration.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CostConfig {
+    /// Optional per-session total-token ceiling.
+    pub session_token_budget: Option<u64>,
 }
 
 /// One skills source entry.
@@ -161,6 +199,7 @@ default_model = "openai:gpt-4o-mini"
 default_model = "openai:gpt-4o-mini"
 max_steps = 12
 turn_timeout_ms = 90000
+dispatch_mode = "prompt_guided"
 
 [llm]
 retry_max = 2
@@ -169,6 +208,11 @@ stream_default = false
 [policy]
 deny_tools = []
 allow_tools = ["local/read_file"]
+default_deny = false
+
+[approval]
+mode = "allow_all"
+deny_tools = ["local/shell_exec"]
 
 [[mcp.servers]]
 id = "filesystem"
@@ -182,6 +226,9 @@ max_selected = 2
 token_budget_tokens = 1200
 token_budget_ratio = 0.10
 
+[cost]
+session_token_budget = 10000
+
 [[skills.sources]]
 type = "directory"
 path = "./skills"
@@ -193,6 +240,7 @@ recursive = false
             .and_then(|c| c.try_deserialize())?;
 
         assert_eq!(cfg.runtime.max_steps, Some(12));
+        assert_eq!(cfg.runtime.dispatch_mode, Some(RuntimeDispatchMode::PromptGuided));
         let mcp = cfg.mcp.as_ref().ok_or_else(|| eyre::eyre!("mcp config should exist"))?;
         let servers = &mcp.servers;
         assert_eq!(servers.len(), 1);
@@ -203,9 +251,16 @@ recursive = false
             cfg.policy.as_ref().and_then(|p| p.allow_tools.clone()),
             Some(vec!["local/read_file".to_string()])
         );
+        assert_eq!(cfg.policy.as_ref().and_then(|p| p.default_deny), Some(false));
+        assert_eq!(cfg.approval.as_ref().and_then(|p| p.mode), Some(ApprovalMode::AllowAll));
+        assert_eq!(
+            cfg.approval.as_ref().and_then(|p| p.deny_tools.clone()),
+            Some(vec!["local/shell_exec".to_string()])
+        );
         assert_eq!(cfg.skills.as_ref().and_then(|s| s.max_selected), Some(2));
         assert_eq!(cfg.skills.as_ref().and_then(|s| s.token_budget_tokens), Some(1200));
         assert_eq!(cfg.skills.as_ref().and_then(|s| s.token_budget_ratio), Some(0.10));
+        assert_eq!(cfg.cost.as_ref().and_then(|c| c.session_token_budget), Some(10_000));
         Ok(())
     }
 

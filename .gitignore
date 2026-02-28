@@ -28,4 +28,4 @@ bun.lockb
 
 # Leptos
 /site/
-.rumdl+cache/
+.rumdl_cache/

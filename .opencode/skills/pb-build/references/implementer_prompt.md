@@ -16,13 +16,19 @@ You are implementing **Task {{TASK_NUMBER}}: {{TASK_NAME}}**.
 
 {{PROJECT_CONTEXT}}
 
-> The above is assembled from `AGENTS.md` (project conventions) and `design.md` (feature design). Use it to understand the tech stack, coding style, project structure, and design decisions.
+> The above is assembled from `AGENTS.md` (non-obvious gotchas and hard constraints) and `design.md` (feature design). AGENTS.md is intentionally minimal — discover tech stack, structure, and conventions directly from the codebase.
 
 ---
 
 ## Your Job
 
 Execute the following steps in strict order. **You must output your reasoning for each step.** Do not skip or reorder any step.
+
+Before coding, define a compact task contract from the provided task block:
+
+- What must change
+- What must not change
+- How success is verified
 
 ### 1. Grounding & State Verification (Mandatory)
 
@@ -32,6 +38,7 @@ Execute the following steps in strict order. **You must output your reasoning fo
 2. **Read Context:** Read the content of target files (`cat`, `read_file`, or equivalent) to understand the surrounding code, existing patterns, and current state.
 3. **Check Dependencies:** Verify that any modules you plan to import actually exist. Check `pyproject.toml`, `package.json`, `Cargo.toml`, or equivalent before importing third-party libraries.
 4. **Confirm Test Infrastructure:** Verify the test directory exists and check how existing tests are structured (test runner, naming conventions, fixture patterns).
+5. **Confirm Task Boundaries:** Ensure your plan stays within the current task and does not absorb work from later tasks.
 
 > **Why this step is mandatory:** Long-running agents are prone to "path hallucination" — assuming files exist at locations they don't or that code has a structure it doesn't. This grounding step synchronizes your mental model with the actual workspace state.
 
@@ -78,6 +85,11 @@ Follow the Red → Green → Refactor cycle strictly. **Each phase must be a sep
 - Do NOT add architecture or abstractions beyond what the task requires.
 - Run the full test suite again after any refactoring.
 
+#### 2f. Scope Check
+
+- Confirm implementation matches the task contract and does not include extra scope.
+- If extra scope slipped in, remove it before submitting.
+
 #### Design Infeasibility
 
 If during implementation you discover the design is **infeasible** (API doesn't exist, data structure won't work, dependency conflict, etc.):
@@ -92,10 +104,11 @@ Before submitting, answer each question honestly:
 
 - [ ] **Completeness:** Did I implement everything the task requires?
 - [ ] **Nothing extra:** Did I avoid implementing things not in this task?
-- [ ] **Conventions:** Does the code follow project conventions from `AGENTS.md`?
+- [ ] **Conventions:** Does the code follow project conventions (discovered from codebase; `AGENTS.md` for non-obvious constraints)?
 - [ ] **Test coverage:** Do the tests meaningfully verify the task's requirements?
 - [ ] **No regressions:** Do all pre-existing tests still pass?
 - [ ] **YAGNI:** Is there any over-engineering I should remove?
+- [ ] **Verification mapping:** Is the task's stated Verification explicitly satisfied?
 
 If any answer is "no", fix the issue before submitting.
 
@@ -121,6 +134,9 @@ Report your work in this format:
 - [Describe how the task's Verification criterion was met]
 - Test suite result: X tests passed, 0 failed
 
+### Commands Run
+- [command] — [key outcome]
+
 ### Issues / Notes
 - [Any concerns, edge cases discovered, or notes for the next task]
 - [Or "None"]
@@ -138,6 +154,7 @@ Report your work in this format:
 - **Tests are mandatory.** Never submit implementation without tests.
 - **TDD phases are separate actions.** Never write test and implementation in the same step. Write tests first, see them fail, then write implementation.
 - **File a Design Change Request** if the design is infeasible rather than forcing a broken approach.
+- **No unverified claims.** Do not report success without command output evidence.
 
 ## Harness Rules (Strict)
 
@@ -149,3 +166,4 @@ These rules act as your safety harness — they prevent common failure modes in 
 4. **Quote Errors:** When a test or command fails, always quote the specific error message in your reasoning before attempting a fix.
 5. **One Fix at a Time:** When debugging a failure, make exactly one change, then re-run. Do not stack multiple speculative fixes.
 6. **Path Verification:** Never hardcode or assume file paths. Use `ls`, `find`, or file search to confirm paths before using them.
+7. **Verification-backed status:** Completion claims must be supported by command output from this run.
