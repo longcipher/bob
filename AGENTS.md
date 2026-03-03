@@ -3,9 +3,9 @@
 ## Scope
 
 - This template targets Rust workspaces only.
-- `bin/` contains CLI or frontend entry binary crates.
+- `bin/` contains CLI binary crates.
 - `crates/` contains reusable library crates.
-- Frontend stack is Leptos CSR with `cargo-leptos`.
+- No frontend/web-framework-specific assumptions.
 
 ## Cargo Workspace Rules (Critical)
 
@@ -50,13 +50,6 @@ When introducing new dependencies, prefer these versions unless compatibility re
 - `winnow = "0.7.14"`
 - `shadow-rs = "1.7.0"`
 - `ecdysis = "1.0.1"`
-- `leptos = "0.8.16"`
-- `leptos_meta = "0.8.6"`
-- `leptos_router = "0.8.12"`
-- `wasm-bindgen = "0.2.113"`
-- `console_error_panic_hook = "0.1.7"`
-- `console_log = "1.0.0"`
-- `log = "0.4.29"`
 
 ## Dependency Priority and Forbidden Choices
 
@@ -64,8 +57,7 @@ When introducing new dependencies, prefer these versions unless compatibility re
 - Concurrent map/set preference: `scc` over `dashmap` and `RwLock<HashMap<...>>`.
 - Parsing preference: `winnow` or `pest` over ad-hoc manual parsing.
 - Read-heavy shared state: `arc-swap` over `RwLock`.
-- Forbidden by default: `anyhow`, `reqwest`, `dashmap`.
-- Build tool restriction (frontend): use `cargo-leptos`; do not use `trunk`.
+- Forbidden by default: `anyhow`, `log`, `reqwest`, `dashmap`.
 
 ## Engineering Principles
 
@@ -82,7 +74,7 @@ When introducing new dependencies, prefer these versions unless compatibility re
    - Prefer lock-free/container-first approaches (`scc`, `ArcSwap`).
    - Avoid `Arc<Mutex<T>>` when better alternatives are available.
 4. Observability:
-   - Logging: `tracing` by default; `log` is allowed for browser console integration in Leptos WASM entry crates.
+   - Logging: `tracing` only.
    - Metrics/traces: OpenTelemetry OTLP gRPC.
    - Prometheus should not be the default instrumentation path.
 5. API docs:
@@ -154,18 +146,6 @@ When introducing new dependencies, prefer these versions unless compatibility re
 - Incomplete implementations: finish features before submitting.
 - Large, sweeping changes: keep changes focused and reviewable.
 - Mixing unrelated changes: keep one logical change per commit.
-
-## Leptos Frontend Rules
-
-- Use `cargo-leptos` for frontend build/dev/serve.
-- Keep Leptos configuration in crate-local `[package.metadata.leptos]`.
-- Use `leptosfmt` in formatting/lint pipelines.
-- If styling is not explicitly specified, default to `singlestage` + Tailwind CSS v4.
-- Do not use `tailwind.config.js`; use Tailwind CSS v4 CSS-first configuration (for example `@theme` in CSS).
-- Leptos semantics:
-  - Use `move ||` for dynamic reactive attributes and values.
-  - Access signals as functions (`count()` style) when applicable.
-  - Use `#[server]` for server calls when building full-stack flows.
 
 ## Foundry Rules (If Solidity Exists)
 
