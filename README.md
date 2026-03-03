@@ -30,6 +30,7 @@ This workspace contains the following crates:
 | **[bob-core](https://crates.io/crates/bob-core)** | Core domain types and port traits | [![docs.rs](https://docs.rs/bob-core/badge.svg)](https://docs.rs/bob-core) |
 | **[bob-runtime](https://crates.io/crates/bob-runtime)** | Runtime orchestration layer | [![docs.rs](https://docs.rs/bob-runtime/badge.svg)](https://docs.rs/bob-runtime) |
 | **[bob-adapters](https://crates.io/crates/bob-adapters)** | Adapter implementations | [![docs.rs](https://docs.rs/bob-adapters/badge.svg)](https://docs.rs/bob-adapters) |
+| **[bob-chat](https://crates.io/crates/bob-chat)** | Chat channel types and streaming abstractions | [![docs.rs](https://docs.rs/bob-chat/badge.svg)](https://docs.rs/bob-chat) |
 | **bob-cli** | CLI application (package: `cli-agent`) | - |
 
 ## Architecture
@@ -39,6 +40,7 @@ bin/cli-agent        — CLI composition root (config, REPL)
 crates/bob-core      — Domain types and port traits (LlmPort, ToolPort, SessionStore, EventSink)
 crates/bob-runtime   — Scheduler FSM, prompt builder, action parser, CompositeToolPort
 crates/bob-adapters  — Concrete adapter implementations (genai, rmcp, in-memory store, tracing)
+crates/bob-chat      — Chat channel types and streaming abstractions
 ```
 
 ```text
@@ -250,7 +252,8 @@ just ci
 ├── crates/
 │   ├── bob-core/           # Domain types and ports
 │   ├── bob-runtime/        # Runtime orchestration
-│   └── bob-adapters/       # Adapter implementations
+│   ├── bob-adapters/       # Adapter implementations
+│   └── bob-chat/           # Chat channel types and streaming abstractions
 ├── docs/
 │   └── design.md           # Architecture design
 ├── specs/                  # Task specifications
@@ -295,6 +298,9 @@ cargo publish -p bob-runtime
 
 # Publish bob-adapters
 cargo publish -p bob-adapters
+
+# Publish bob-chat
+cargo publish -p bob-chat
 ```
 
 ### Documentation
@@ -304,6 +310,7 @@ Documentation is automatically generated on [docs.rs](https://docs.rs) when publ
 - [bob-core docs](https://docs.rs/bob-core)
 - [bob-runtime docs](https://docs.rs/bob-runtime)
 - [bob-adapters docs](https://docs.rs/bob-adapters)
+- [bob-chat docs](https://docs.rs/bob-chat)
 
 ## Contributing
 
