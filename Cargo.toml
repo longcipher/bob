@@ -18,12 +18,14 @@ resolver = "3"
 [workspace.dependencies]
 # internal crates
 bob-adapters = { path = "crates/bob-adapters", version = "0.2.0" }
+bob-chat = { path = "crates/bob-chat", version = "0.2.0" }
 bob-core = { path = "crates/bob-core", version = "0.2.0" }
 bob-runtime = { path = "crates/bob-runtime", version = "0.2.0" }
 
 # external crates
 agent-skills = "0.2.0"
 async-trait = "0.1.89"
+bytes = "1"
 futures-core = "0.3.32"
 futures-util = "0.3"
 genai = "=0.6.0-beta.3"

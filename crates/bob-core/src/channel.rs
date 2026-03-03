@@ -52,6 +52,9 @@ pub enum ChannelError {
     /// Sending a message to the user failed.
     #[error("send failed: {0}")]
     SendFailed(String),
+    /// The requested feature is not supported by this channel.
+    #[error("not supported: {0}")]
+    NotSupported(String),
     /// The channel has been closed (user disconnected, etc.).
     #[error("channel closed")]
     Closed,
