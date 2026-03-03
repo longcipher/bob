@@ -54,6 +54,7 @@
 
 use crate::{
     error::{CostError, LlmError, StoreError, ToolError},
+    tape::{TapeEntry, TapeEntryKind, TapeSearchResult},
     types::{
         AgentEvent, ApprovalContext, ApprovalDecision, ArtifactRecord, LlmCapabilities, LlmRequest,
         LlmResponse, LlmStream, SessionId, SessionState, TokenUsage, ToolCall, ToolDescriptor,
@@ -184,6 +185,44 @@ pub trait CostMeterPort: Send + Sync {
         session_id: &SessionId,
         tool_result: &ToolResult,
     ) -> Result<(), CostError>;
+}
+
+// ── Tape Store ───────────────────────────────────────────────────────
+
+/// Port for the append-only conversation tape.
+///
+/// The tape records all messages, events, anchors, and handoffs. It is
+/// separate from the session store: the session store tracks LLM context,
+/// while the tape provides a searchable audit log.
+#[async_trait::async_trait]
+pub trait TapeStorePort: Send + Sync {
+    /// Append a new entry to the session's tape.
+    async fn append(
+        &self,
+        session_id: &SessionId,
+        kind: TapeEntryKind,
+    ) -> Result<TapeEntry, StoreError>;
+
+    /// Return entries recorded since the most recent handoff.
+    ///
+    /// If no handoff exists, returns all entries.
+    async fn entries_since_last_handoff(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<TapeEntry>, StoreError>;
+
+    /// Search the tape for entries matching a query string.
+    async fn search(
+        &self,
+        session_id: &SessionId,
+        query: &str,
+    ) -> Result<Vec<TapeSearchResult>, StoreError>;
+
+    /// Return all entries for a session.
+    async fn all_entries(&self, session_id: &SessionId) -> Result<Vec<TapeEntry>, StoreError>;
+
+    /// Return only anchor entries for a session.
+    async fn anchors(&self, session_id: &SessionId) -> Result<Vec<TapeEntry>, StoreError>;
 }
 
 // ── Session Store ────────────────────────────────────────────────────

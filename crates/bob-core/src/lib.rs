@@ -65,8 +65,10 @@
 
 // ── Modules ──────────────────────────────────────────────────────────
 
+pub mod channel;
 pub mod error;
 pub mod ports;
+pub mod tape;
 pub mod tool_policy;
 pub mod types;
 
@@ -75,7 +77,8 @@ pub mod types;
 pub use error::{AgentError, CostError, LlmError, StoreError, ToolError};
 pub use ports::{
     ApprovalPort, ArtifactStorePort, CostMeterPort, EventSink, LlmPort, SessionStore,
-    ToolCatalogPort, ToolExecutorPort, ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
+    TapeStorePort, ToolCatalogPort, ToolExecutorPort, ToolPolicyPort, ToolPort,
+    TurnCheckpointStorePort,
 };
 pub use tool_policy::{
     intersect_allowlists, is_tool_allowed, merge_allowlists, normalize_tool_list, tools_match,

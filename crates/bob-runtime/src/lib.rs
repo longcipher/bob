@@ -78,8 +78,11 @@
 //! [`bob_adapters`]: https://docs.rs/bob-adapters
 
 pub mod action;
+pub mod agent_loop;
 pub mod composite;
+pub mod progressive_tools;
 pub mod prompt;
+pub mod router;
 pub mod scheduler;
 pub mod tooling;
 

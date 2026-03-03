@@ -402,6 +402,9 @@ pub(crate) async fn run_turn_with_extensions(
     let tool_descriptors = tools.list_tools().await?;
     let mut guard = LoopGuard::new(policy.clone());
 
+    // Progressive tool view: compact summaries for inactive tools, full schemas for activated.
+    let mut tool_view = crate::progressive_tools::ProgressiveToolView::new(tool_descriptors);
+
     events.emit(AgentEvent::TurnStarted { session_id: req.session_id.clone() });
     if !selected_skills.is_empty() {
         events.emit(AgentEvent::SkillsSelected { skill_names: selected_skills.clone() });
@@ -412,6 +415,8 @@ pub(crate) async fn run_turn_with_extensions(
     let mut tool_transcript: Vec<ToolResult> = Vec::new();
     let mut total_usage = TokenUsage::default();
     let mut consecutive_parse_failures: u32 = 0;
+    // Tool call dedup: detect infinite loops from repeated identical tool calls.
+    let mut seen_tool_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
         if let Some(ref token) = cancel_token &&
@@ -452,11 +457,21 @@ pub(crate) async fn run_turn_with_extensions(
             .await;
         }
 
+        // Build system instructions with progressive tool summary.
+        let mut augmented_instructions = system_instructions.clone();
+        let tool_summary = tool_view.summary_prompt();
+        if !tool_summary.is_empty() {
+            augmented_instructions.push('\n');
+            augmented_instructions.push('\n');
+            augmented_instructions.push_str(&tool_summary);
+        }
+
+        let active_tools = tool_view.activated_tools();
         let llm_request = crate::prompt::build_llm_request_with_options(
             model,
             &session,
-            &tool_descriptors,
-            &system_instructions,
+            &active_tools,
+            &augmented_instructions,
             prompt_options_for_mode(dispatch_mode, llm),
         );
 
@@ -482,6 +497,9 @@ pub(crate) async fn run_turn_with_extensions(
         cost_meter.record_llm_usage(&req.session_id, model, &llm_response.usage).await?;
 
         events.emit(AgentEvent::LlmCallCompleted { usage: llm_response.usage.clone() });
+
+        // Scan LLM response for tool name hints and activate them.
+        tool_view.activate_hints(&llm_response.content);
 
         session
             .messages
@@ -531,6 +549,34 @@ pub(crate) async fn run_turn_with_extensions(
                         .await;
                     }
                     AgentAction::ToolCall { name, arguments } => {
+                        // Activate the tool in progressive view for subsequent requests.
+                        tool_view.activate(&name);
+
+                        // Deduplicate identical tool calls to prevent infinite loops.
+                        let call_signature = format!(
+                            "{}:{}",
+                            name,
+                            serde_json::to_string(&arguments).unwrap_or_default()
+                        );
+                        if !seen_tool_calls.insert(call_signature) {
+                            let dup_result = ToolResult {
+                                name: name.clone(),
+                                output: serde_json::json!({
+                                    "error": "duplicate tool call detected (same name + arguments) — skipping to prevent loop"
+                                }),
+                                is_error: true,
+                            };
+                            guard.record_tool_call();
+                            let output_str =
+                                serde_json::to_string(&dup_result.output).unwrap_or_default();
+                            session
+                                .messages
+                                .push(Message { role: Role::Tool, content: output_str });
+                            events.emit(AgentEvent::ToolCallCompleted { name, is_error: true });
+                            tool_transcript.push(dup_result);
+                            continue;
+                        }
+
                         events.emit(AgentEvent::ToolCallStarted { name: name.clone() });
                         let approval_context = ApprovalContext {
                             session_id: req.session_id.clone(),
