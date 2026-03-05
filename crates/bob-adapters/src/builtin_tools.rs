@@ -49,7 +49,7 @@ impl BuiltinToolPort {
         }
 
         for component in path.components() {
-            if matches!(component, Component::ParentDir) {
+            if matches!(component, Component::ParentDir | Component::Prefix(_)) {
                 return Err(ToolError::Execution(
                     "parent directory traversal (..) not allowed".to_string(),
                 ));
@@ -57,6 +57,54 @@ impl BuiltinToolPort {
         }
 
         Ok(self.workspace.join(relative))
+    }
+
+    async fn workspace_canonical_path(&self) -> Result<PathBuf, ToolError> {
+        tokio::fs::canonicalize(&self.workspace).await.map_err(|err| {
+            ToolError::Execution(format!(
+                "failed to resolve workspace path '{}': {err}",
+                self.workspace.display()
+            ))
+        })
+    }
+
+    async fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf, ToolError> {
+        let mut probe = path.to_path_buf();
+        loop {
+            match tokio::fs::symlink_metadata(&probe).await {
+                Ok(_) => return Ok(probe),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    let Some(parent) = probe.parent() else {
+                        return Err(ToolError::Execution(format!(
+                            "path '{}' has no existing ancestor",
+                            path.display()
+                        )));
+                    };
+                    probe = parent.to_path_buf();
+                }
+                Err(err) => {
+                    return Err(ToolError::Execution(format!(
+                        "failed to inspect path '{}': {err}",
+                        probe.display()
+                    )));
+                }
+            }
+        }
+    }
+
+    async fn ensure_within_workspace(&self, candidate: &Path) -> Result<(), ToolError> {
+        let workspace = self.workspace_canonical_path().await?;
+        let ancestor = Self::nearest_existing_ancestor(candidate).await?;
+        let canonical_ancestor = tokio::fs::canonicalize(&ancestor).await.map_err(|err| {
+            ToolError::Execution(format!("failed to resolve path '{}': {err}", ancestor.display()))
+        })?;
+        if !canonical_ancestor.starts_with(&workspace) {
+            return Err(ToolError::Execution(format!(
+                "path '{}' resolves outside workspace sandbox",
+                candidate.display()
+            )));
+        }
+        Ok(())
     }
 
     /// Execute the `local/file_read` tool.
@@ -67,6 +115,7 @@ impl BuiltinToolPort {
             .ok_or_else(|| ToolError::Execution("missing 'path' argument".to_string()))?;
 
         let full_path = self.resolve_safe_path(path_str)?;
+        self.ensure_within_workspace(&full_path).await?;
         let content = tokio::fs::read_to_string(&full_path)
             .await
             .map_err(|e| ToolError::Execution(format!("read failed: {e}")))?;
@@ -87,6 +136,7 @@ impl BuiltinToolPort {
             .ok_or_else(|| ToolError::Execution("missing 'content' argument".to_string()))?;
 
         let full_path = self.resolve_safe_path(path_str)?;
+        self.ensure_within_workspace(&full_path).await?;
 
         // Create parent directories if needed.
         if let Some(parent) = full_path.parent() {
@@ -107,6 +157,7 @@ impl BuiltinToolPort {
         let path_str = args.get("path").and_then(serde_json::Value::as_str).unwrap_or(".");
 
         let full_path = self.resolve_safe_path(path_str)?;
+        self.ensure_within_workspace(&full_path).await?;
         let mut entries = Vec::new();
         let mut dir = tokio::fs::read_dir(&full_path)
             .await
@@ -246,6 +297,9 @@ impl bob_core::ports::ToolPort for BuiltinToolPort {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs as unix_fs;
+
     use bob_core::ports::ToolPort;
 
     use super::*;
@@ -303,5 +357,72 @@ mod tests {
             assert!(!r.is_error);
             assert_eq!(r.output.get("content").and_then(|v| v.as_str()), Some("hello"));
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_read_rejects_symlink_escape() {
+        let workspace = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let outside = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let outside_file = outside.path().join("secret.txt");
+        let wrote = std::fs::write(&outside_file, "secret");
+        assert!(wrote.is_ok());
+
+        let link_path = workspace.path().join("link.txt");
+        let linked = unix_fs::symlink(&outside_file, &link_path);
+        assert!(linked.is_ok(), "should create symlink test fixture");
+
+        let port = BuiltinToolPort::new(workspace.path().to_path_buf());
+        let result = port
+            .call_tool(ToolCall {
+                name: "local/file_read".to_string(),
+                arguments: json!({ "path": "link.txt" }),
+            })
+            .await;
+
+        assert!(result.is_ok());
+        if let Ok(tool_result) = result {
+            assert!(tool_result.is_error, "symlink escape must be blocked");
+            let error = tool_result
+                .output
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            assert!(error.contains("outside workspace"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_write_rejects_symlink_escape() {
+        let workspace = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let outside = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let outside_dir = outside.path().join("target");
+        let created = std::fs::create_dir_all(&outside_dir);
+        assert!(created.is_ok());
+
+        let link_path = workspace.path().join("escape");
+        let linked = unix_fs::symlink(&outside_dir, &link_path);
+        assert!(linked.is_ok(), "should create symlink test fixture");
+
+        let port = BuiltinToolPort::new(workspace.path().to_path_buf());
+        let result = port
+            .call_tool(ToolCall {
+                name: "local/file_write".to_string(),
+                arguments: json!({
+                    "path": "escape/pwned.txt",
+                    "content": "blocked"
+                }),
+            })
+            .await;
+
+        assert!(result.is_ok());
+        if let Ok(tool_result) = result {
+            assert!(tool_result.is_error, "symlink escape must be blocked");
+        }
+        assert!(
+            !outside_dir.join("pwned.txt").exists(),
+            "write must not touch paths outside workspace"
+        );
     }
 }

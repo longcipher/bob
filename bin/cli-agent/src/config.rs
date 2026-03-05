@@ -10,6 +10,7 @@ pub(crate) struct AgentConfig {
     pub runtime: RuntimeConfig,
     #[expect(dead_code, reason = "reserved for v2 LLM retry/stream config")]
     pub llm: Option<LlmConfig>,
+    pub store: Option<StoreConfig>,
     pub policy: Option<PolicyConfig>,
     pub approval: Option<ApprovalConfig>,
     pub mcp: Option<McpConfig>,
@@ -48,6 +49,13 @@ pub(crate) struct LlmConfig {
     pub retry_max: Option<u32>,
     /// Whether streaming is default.
     pub stream_default: Option<bool>,
+}
+
+/// Persistent session store configuration.
+#[derive(Debug, Deserialize)]
+pub(crate) struct StoreConfig {
+    /// Directory used for session snapshots. If omitted, in-memory store is used.
+    pub path: String,
 }
 
 /// Behavioural policy overrides.
@@ -152,7 +160,71 @@ pub(crate) fn load_config(path: &str) -> eyre::Result<AgentConfig> {
         .add_source(config::File::with_name(path).required(true))
         .build()?;
     let cfg: AgentConfig = settings.try_deserialize()?;
+    validate_config(&cfg)?;
     Ok(cfg)
+}
+
+fn validate_config(cfg: &AgentConfig) -> eyre::Result<()> {
+    if cfg.runtime.default_model.trim().is_empty() {
+        return Err(eyre::eyre!("runtime.default_model must not be empty"));
+    }
+
+    if matches!(cfg.runtime.max_steps, Some(0)) {
+        return Err(eyre::eyre!("runtime.max_steps must be greater than 0"));
+    }
+    if matches!(cfg.runtime.turn_timeout_ms, Some(0)) {
+        return Err(eyre::eyre!("runtime.turn_timeout_ms must be greater than 0"));
+    }
+    if matches!(cfg.runtime.model_context_tokens, Some(0)) {
+        return Err(eyre::eyre!("runtime.model_context_tokens must be greater than 0"));
+    }
+
+    if let Some(ref mcp) = cfg.mcp {
+        let mut ids = std::collections::HashSet::with_capacity(mcp.servers.len());
+        for server in &mcp.servers {
+            if server.id.trim().is_empty() {
+                return Err(eyre::eyre!("mcp.servers[].id must not be empty"));
+            }
+            if !ids.insert(server.id.clone()) {
+                return Err(eyre::eyre!("duplicate mcp server id '{}'", server.id));
+            }
+            if server.command.trim().is_empty() {
+                return Err(eyre::eyre!("mcp server '{}' command must not be empty", server.id));
+            }
+            if matches!(server.tool_timeout_ms, Some(0)) {
+                return Err(eyre::eyre!(
+                    "mcp server '{}' tool_timeout_ms must be greater than 0",
+                    server.id
+                ));
+            }
+        }
+    }
+
+    if let Some(ref store) = cfg.store &&
+        store.path.trim().is_empty()
+    {
+        return Err(eyre::eyre!("store.path must not be empty when store is configured"));
+    }
+
+    if let Some(ref skills) = cfg.skills {
+        if matches!(skills.max_selected, Some(0)) {
+            return Err(eyre::eyre!("skills.max_selected must be greater than 0"));
+        }
+        if matches!(skills.token_budget_tokens, Some(0)) {
+            return Err(eyre::eyre!("skills.token_budget_tokens must be greater than 0"));
+        }
+        if let Some(ratio) = skills.token_budget_ratio &&
+            (!(0.0..=1.0).contains(&ratio) || ratio == 0.0)
+        {
+            return Err(eyre::eyre!("skills.token_budget_ratio must satisfy 0.0 < ratio <= 1.0"));
+        }
+    }
+
+    if matches!(cfg.cost.as_ref().and_then(|cost| cost.session_token_budget), Some(0)) {
+        return Err(eyre::eyre!("cost.session_token_budget must be greater than 0"));
+    }
+
+    Ok(())
 }
 
 /// Resolve `${VAR_NAME}` placeholders from the current process environment.
@@ -205,6 +277,9 @@ dispatch_mode = "prompt_guided"
 retry_max = 2
 stream_default = false
 
+[store]
+path = "./.bob/sessions"
+
 [policy]
 deny_tools = []
 allow_tools = ["local/read_file"]
@@ -247,6 +322,7 @@ recursive = false
         assert_eq!(servers[0].id, "filesystem");
         assert_eq!(servers[0].transport, McpTransport::Stdio);
         assert_eq!(servers[0].args.len(), 3);
+        assert_eq!(cfg.store.as_ref().map(|s| s.path.as_str()), Some("./.bob/sessions"));
         assert_eq!(
             cfg.policy.as_ref().and_then(|p| p.allow_tools.clone()),
             Some(vec!["local/read_file".to_string()])
@@ -338,5 +414,75 @@ recursive = false
     fn interpolate_missing_env_fails() {
         let resolved = resolve_env_placeholders("${__BOB_TEST_MISSING_ENV__}");
         assert!(resolved.is_err(), "missing env placeholder must fail");
+    }
+
+    #[test]
+    fn reject_zero_runtime_limits() -> eyre::Result<()> {
+        let toml_str = r#"
+[runtime]
+default_model = "openai:gpt-4o-mini"
+max_steps = 0
+turn_timeout_ms = 0
+"#;
+        let cfg: AgentConfig = config::Config::builder()
+            .add_source(config::File::from_str(toml_str, config::FileFormat::Toml))
+            .build()
+            .and_then(|c| c.try_deserialize())?;
+
+        let err = validate_config(&cfg);
+        assert!(err.is_err(), "zero runtime limits should be rejected");
+        let msg = err.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(msg.contains("max_steps"));
+        Ok(())
+    }
+
+    #[test]
+    fn reject_duplicate_mcp_server_ids() -> eyre::Result<()> {
+        let toml_str = r#"
+[runtime]
+default_model = "openai:gpt-4o-mini"
+
+[mcp]
+[[mcp.servers]]
+id = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+
+[[mcp.servers]]
+id = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+"#;
+        let cfg: AgentConfig = config::Config::builder()
+            .add_source(config::File::from_str(toml_str, config::FileFormat::Toml))
+            .build()
+            .and_then(|c| c.try_deserialize())?;
+
+        let err = validate_config(&cfg);
+        assert!(err.is_err(), "duplicate MCP server ids should be rejected");
+        let msg = err.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(msg.contains("duplicate mcp server id"));
+        Ok(())
+    }
+
+    #[test]
+    fn reject_empty_store_path() -> eyre::Result<()> {
+        let toml_str = r#"
+[runtime]
+default_model = "openai:gpt-4o-mini"
+
+[store]
+path = ""
+"#;
+        let cfg: AgentConfig = config::Config::builder()
+            .add_source(config::File::from_str(toml_str, config::FileFormat::Toml))
+            .build()
+            .and_then(|c| c.try_deserialize())?;
+
+        let err = validate_config(&cfg);
+        assert!(err.is_err(), "empty store path should be rejected");
+        let msg = err.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(msg.contains("store.path"));
+        Ok(())
     }
 }

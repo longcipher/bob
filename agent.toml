@@ -30,6 +30,13 @@ turn_timeout_ms = 90000
 # retry_max = 2
 # stream_default = false
 
+# ── Persistent Store (optional) ──────────────────────────────────────
+# Configure this to persist session context/checkpoints/artifacts across
+# process restarts. If omitted, Bob uses in-memory storage.
+#
+# [store]
+# path = "./.bob/sessions"
+
 # ── Policy (optional) ─────────────────────────────────────────────────
 
 # [policy]
@@ -70,4 +77,5 @@ turn_timeout_ms = 90000
 # ── Cost Controls (optional) ─────────────────────────────────────────
 # [cost]
 # Optional per-session total token budget.
+# When [store] is configured, usage counters are also persisted on disk.
 # session_token_budget = 10000

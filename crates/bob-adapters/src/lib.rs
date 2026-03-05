@@ -108,10 +108,14 @@ pub mod mcp_rmcp;
 pub mod skills_agent;
 
 pub mod approval_static;
+pub mod artifact_file;
 pub mod artifact_memory;
+pub mod checkpoint_file;
 pub mod checkpoint_memory;
+pub mod cost_file;
 pub mod cost_simple;
 pub mod policy_static;
+pub mod store_file;
 pub mod store_memory;
 
 #[cfg(feature = "observe-tracing")]

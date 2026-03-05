@@ -62,6 +62,10 @@ type = "directory"
 path = "./skills"
 recursive = false
 
+# Optional: Persist session state/checkpoints/artifacts across restarts
+[store]
+path = "./.bob/sessions"
+
 # Optional: Configure policies
 [policy]
 deny_tools = ["local/shell_exec"]
@@ -77,6 +81,9 @@ deny_tools = ["local/shell_exec"]
 [cost]
 session_token_budget = 10000
 ```
+
+When `[store]` is set, budget accounting is also persisted, so restarting the
+CLI does not reset per-session token limits.
 
 `dispatch_mode` supports `native_preferred` and `prompt_guided`.
 
@@ -116,7 +123,10 @@ Type a message and press Enter. /quit to exit.
 
 - Type your message and press **Enter** to send
 - `/quit` or `/exit` to exit the agent
-- `/help` for available commands (coming soon)
+- `/help` or `/h` to show available commands
+- `/tools` to list all available tools
+- `/tool.describe <tool-name>` to print a tool schema
+- `/new` or `/reset` to start a fresh session context
 
 ### Example Session
 

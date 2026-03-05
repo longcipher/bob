@@ -137,6 +137,7 @@ const DEFAULT_SYSTEM_INSTRUCTIONS: &str = "\
 You are a helpful AI assistant. \
 Think step by step before answering. \
 When you need external information, use the available tools.";
+const MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS: u32 = 3;
 
 fn resolve_system_instructions(req: &AgentRequest) -> String {
     let Some(skills_prompt) = req.context.system_prompt.as_deref() else {
@@ -415,8 +416,9 @@ pub(crate) async fn run_turn_with_extensions(
     let mut tool_transcript: Vec<ToolResult> = Vec::new();
     let mut total_usage = TokenUsage::default();
     let mut consecutive_parse_failures: u32 = 0;
-    // Tool call dedup: detect infinite loops from repeated identical tool calls.
-    let mut seen_tool_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Loop protection: cap repeated identical calls, while allowing non-consecutive repeats.
+    let mut last_tool_call_signature: Option<String> = None;
+    let mut same_tool_call_streak: u32 = 0;
 
     loop {
         if let Some(ref token) = cancel_token &&
@@ -494,6 +496,12 @@ pub(crate) async fn run_turn_with_extensions(
         guard.record_step();
         total_usage.prompt_tokens += llm_response.usage.prompt_tokens;
         total_usage.completion_tokens += llm_response.usage.completion_tokens;
+        session.total_usage.prompt_tokens =
+            session.total_usage.prompt_tokens.saturating_add(llm_response.usage.prompt_tokens);
+        session.total_usage.completion_tokens = session
+            .total_usage
+            .completion_tokens
+            .saturating_add(llm_response.usage.completion_tokens);
         cost_meter.record_llm_usage(&req.session_id, model, &llm_response.usage).await?;
 
         events.emit(AgentEvent::LlmCallCompleted { usage: llm_response.usage.clone() });
@@ -552,27 +560,49 @@ pub(crate) async fn run_turn_with_extensions(
                         // Activate the tool in progressive view for subsequent requests.
                         tool_view.activate(&name);
 
-                        // Deduplicate identical tool calls to prevent infinite loops.
                         let call_signature = format!(
                             "{}:{}",
                             name,
                             serde_json::to_string(&arguments).unwrap_or_default()
                         );
-                        if !seen_tool_calls.insert(call_signature) {
+                        if last_tool_call_signature.as_ref() == Some(&call_signature) {
+                            same_tool_call_streak = same_tool_call_streak.saturating_add(1);
+                        } else {
+                            same_tool_call_streak = 1;
+                            last_tool_call_signature = Some(call_signature);
+                        }
+
+                        if same_tool_call_streak > MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS {
+                            events.emit(AgentEvent::ToolCallStarted { name: name.clone() });
                             let dup_result = ToolResult {
                                 name: name.clone(),
                                 output: serde_json::json!({
-                                    "error": "duplicate tool call detected (same name + arguments) — skipping to prevent loop"
+                                    "error": format!(
+                                        "consecutive duplicate tool call limit reached (>{MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS}); skipping to prevent loop"
+                                    )
                                 }),
                                 is_error: true,
                             };
                             guard.record_tool_call();
+                            let _ =
+                                cost_meter.record_tool_result(&req.session_id, &dup_result).await;
                             let output_str =
                                 serde_json::to_string(&dup_result.output).unwrap_or_default();
                             session
                                 .messages
                                 .push(Message { role: Role::Tool, content: output_str });
-                            events.emit(AgentEvent::ToolCallCompleted { name, is_error: true });
+                            events.emit(AgentEvent::ToolCallCompleted {
+                                name: name.clone(),
+                                is_error: true,
+                            });
+                            let _ = artifact_store
+                                .put(ArtifactRecord {
+                                    session_id: req.session_id.clone(),
+                                    kind: "tool_result".to_string(),
+                                    name: name.clone(),
+                                    content: dup_result.output.clone(),
+                                })
+                                .await;
                             tool_transcript.push(dup_result);
                             continue;
                         }
@@ -621,6 +651,8 @@ pub(crate) async fn run_turn_with_extensions(
             }
             Err(_parse_err) => {
                 consecutive_parse_failures += 1;
+                last_tool_call_signature = None;
+                same_tool_call_streak = 0;
                 if consecutive_parse_failures >= 2 {
                     let _ = store.save(&req.session_id, &session).await;
                     return Err(AgentError::Internal(
@@ -773,6 +805,8 @@ async fn run_turn_stream_inner(
     let mut total_usage = TokenUsage::default();
     let mut consecutive_parse_failures: u32 = 0;
     let mut next_call_id: u64 = 0;
+    let mut last_tool_call_signature: Option<String> = None;
+    let mut same_tool_call_streak: u32 = 0;
 
     events.emit(AgentEvent::TurnStarted { session_id: req.session_id.clone() });
     if !selected_skills.is_empty() {
@@ -839,7 +873,7 @@ async fn run_turn_stream_inner(
             }
             Err(err) => {
                 fallback_to_complete = true;
-                events.emit(AgentEvent::Error { error: err.to_string() });
+                let _ = err;
             }
         }
 
@@ -855,6 +889,10 @@ async fn run_turn_stream_inner(
         guard.record_step();
         total_usage.prompt_tokens += llm_usage.prompt_tokens;
         total_usage.completion_tokens += llm_usage.completion_tokens;
+        session.total_usage.prompt_tokens =
+            session.total_usage.prompt_tokens.saturating_add(llm_usage.prompt_tokens);
+        session.total_usage.completion_tokens =
+            session.total_usage.completion_tokens.saturating_add(llm_usage.completion_tokens);
         config.cost_meter.record_llm_usage(&req.session_id, model, &llm_usage).await?;
         events.emit(AgentEvent::LlmCallCompleted { usage: llm_usage.clone() });
         session
@@ -890,6 +928,62 @@ async fn run_turn_stream_inner(
                     return Ok(());
                 }
                 AgentAction::ToolCall { name, arguments } => {
+                    let call_signature = format!(
+                        "{}:{}",
+                        name,
+                        serde_json::to_string(&arguments).unwrap_or_default()
+                    );
+                    if last_tool_call_signature.as_ref() == Some(&call_signature) {
+                        same_tool_call_streak = same_tool_call_streak.saturating_add(1);
+                    } else {
+                        same_tool_call_streak = 1;
+                        last_tool_call_signature = Some(call_signature);
+                    }
+                    if same_tool_call_streak > MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS {
+                        next_call_id += 1;
+                        let call_id = format!("call-{next_call_id}");
+                        events.emit(AgentEvent::ToolCallStarted { name: name.clone() });
+                        let _ = tx.send(AgentStreamEvent::ToolCallStarted {
+                            name: name.clone(),
+                            call_id: call_id.clone(),
+                        });
+                        guard.record_tool_call();
+                        let duplicate_result = ToolResult {
+                            name: name.clone(),
+                            output: serde_json::json!({
+                                "error": format!(
+                                    "consecutive duplicate tool call limit reached (>{MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS}); skipping to prevent loop"
+                                )
+                            }),
+                            is_error: true,
+                        };
+                        let _ = config
+                            .cost_meter
+                            .record_tool_result(&req.session_id, &duplicate_result)
+                            .await;
+                        events.emit(AgentEvent::ToolCallCompleted {
+                            name: name.clone(),
+                            is_error: true,
+                        });
+                        let output_str =
+                            serde_json::to_string(&duplicate_result.output).unwrap_or_default();
+                        session.messages.push(Message { role: Role::Tool, content: output_str });
+                        let _ = config
+                            .artifact_store
+                            .put(ArtifactRecord {
+                                session_id: req.session_id.clone(),
+                                kind: "tool_result".to_string(),
+                                name: name.clone(),
+                                content: duplicate_result.output.clone(),
+                            })
+                            .await;
+                        let _ = tx.send(AgentStreamEvent::ToolCallCompleted {
+                            call_id,
+                            result: duplicate_result,
+                        });
+                        continue;
+                    }
+
                     events.emit(AgentEvent::ToolCallStarted { name: name.clone() });
                     next_call_id += 1;
                     let call_id = format!("call-{next_call_id}");
@@ -940,6 +1034,8 @@ async fn run_turn_stream_inner(
             }
         } else {
             consecutive_parse_failures += 1;
+            last_tool_call_signature = None;
+            same_tool_call_streak = 0;
             if consecutive_parse_failures >= 2 {
                 store.save(&req.session_id, &session).await?;
                 events.emit(AgentEvent::Error {
@@ -1083,6 +1179,11 @@ mod tests {
                 })
                 .collect();
             Self { responses: Mutex::new(responses) }
+        }
+
+        fn from_responses(responses: Vec<LlmResponse>) -> Self {
+            let queued = responses.into_iter().map(Ok).collect();
+            Self { responses: Mutex::new(queued) }
         }
     }
 
@@ -1262,13 +1363,39 @@ mod tests {
         }
     }
 
+    struct CountingArtifactStore {
+        saved: Mutex<Vec<ArtifactRecord>>,
+    }
+
+    impl CountingArtifactStore {
+        fn new() -> Self {
+            Self { saved: Mutex::new(Vec::new()) }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ArtifactStorePort for CountingArtifactStore {
+        async fn put(&self, artifact: ArtifactRecord) -> Result<(), StoreError> {
+            self.saved.lock().unwrap_or_else(|p| p.into_inner()).push(artifact);
+            Ok(())
+        }
+
+        async fn list_by_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<Vec<ArtifactRecord>, StoreError> {
+            Ok(self.saved.lock().unwrap_or_else(|p| p.into_inner()).clone())
+        }
+    }
+
     struct CountingCostMeter {
         llm_calls: Mutex<u32>,
+        tool_results: Mutex<u32>,
     }
 
     impl CountingCostMeter {
         fn new() -> Self {
-            Self { llm_calls: Mutex::new(0) }
+            Self { llm_calls: Mutex::new(0), tool_results: Mutex::new(0) }
         }
     }
 
@@ -1294,6 +1421,8 @@ mod tests {
             _session_id: &SessionId,
             _tool_result: &ToolResult,
         ) -> Result<(), CostError> {
+            let mut count = self.tool_results.lock().unwrap_or_else(|p| p.into_inner());
+            *count += 1;
             Ok(())
         }
     }
@@ -2080,5 +2209,283 @@ mod tests {
         let llm_calls = *cost.llm_calls.lock().unwrap_or_else(|p| p.into_inner());
         assert!(checkpoints >= 1, "checkpoint port should be invoked at least once");
         assert!(llm_calls >= 1, "cost meter should record llm usage");
+    }
+
+    #[tokio::test]
+    async fn tc17_session_usage_accumulates_and_persists() {
+        let llm_first = SequentialLlm::from_responses(vec![LlmResponse {
+            content: r#"{"type":"final","content":"first"}"#.to_string(),
+            usage: TokenUsage { prompt_tokens: 10, completion_tokens: 5 },
+            finish_reason: FinishReason::Stop,
+            tool_calls: Vec::new(),
+        }]);
+        let llm_second = SequentialLlm::from_responses(vec![LlmResponse {
+            content: r#"{"type":"final","content":"second"}"#.to_string(),
+            usage: TokenUsage { prompt_tokens: 3, completion_tokens: 2 },
+            finish_reason: FinishReason::Stop,
+            tool_calls: Vec::new(),
+        }]);
+        let tools = MockToolPort::empty();
+        let store = MemoryStore::new();
+        let sink = CollectingSink::new();
+
+        let first = run_turn(
+            &llm_first,
+            &tools,
+            &store,
+            &sink,
+            make_request("hello"),
+            &generous_policy(),
+            "test-model",
+        )
+        .await;
+        assert!(first.is_ok(), "first run should succeed");
+
+        let second = run_turn(
+            &llm_second,
+            &tools,
+            &store,
+            &sink,
+            make_request("again"),
+            &generous_policy(),
+            "test-model",
+        )
+        .await;
+        assert!(second.is_ok(), "second run should succeed");
+
+        let loaded = store.load(&"test-session".to_string()).await;
+        assert!(loaded.is_ok(), "session should be persisted");
+        let state = loaded.ok().flatten();
+        assert!(state.is_some(), "session state should exist");
+        let state = state.unwrap_or_default();
+        assert_eq!(state.total_usage.prompt_tokens, 13);
+        assert_eq!(state.total_usage.completion_tokens, 7);
+    }
+
+    struct FallbackOnlyLlm {
+        response: LlmResponse,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for FallbackOnlyLlm {
+        async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, LlmError> {
+            Ok(self.response.clone())
+        }
+
+        async fn complete_stream(&self, _req: LlmRequest) -> Result<LlmStream, LlmError> {
+            Err(LlmError::Provider("streaming not available".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn tc18_stream_fallback_does_not_emit_error_event() {
+        let llm: Arc<dyn LlmPort> = Arc::new(FallbackOnlyLlm {
+            response: LlmResponse {
+                content: r#"{"type":"final","content":"done"}"#.to_string(),
+                usage: TokenUsage { prompt_tokens: 2, completion_tokens: 1 },
+                finish_reason: FinishReason::Stop,
+                tool_calls: Vec::new(),
+            },
+        });
+        let tools: Arc<dyn ToolPort> = Arc::new(MockToolPort::empty());
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let sink = Arc::new(CollectingSink::new());
+        let sink_dyn: Arc<dyn EventSink> = sink.clone();
+
+        let stream_result = run_turn_stream(
+            llm,
+            tools,
+            store,
+            sink_dyn,
+            make_request("hello"),
+            generous_policy(),
+            "test-model".to_string(),
+        )
+        .await;
+        assert!(stream_result.is_ok(), "stream run should succeed with fallback");
+        let mut stream = match stream_result {
+            Ok(stream) => stream,
+            Err(_) => return,
+        };
+
+        while let Some(_event) = stream.next().await {}
+
+        let events = sink.all_events();
+        assert!(
+            !events.iter().any(|event| matches!(event, AgentEvent::Error { .. })),
+            "fallback should not emit AgentEvent::Error when complete() succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn tc19_non_consecutive_duplicate_tool_calls_are_allowed() {
+        let llm = SequentialLlm::from_contents(vec![
+            r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
+            r#"{"type":"tool_call","name":"tool_b","arguments":{"q":"docs"}}"#,
+            r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
+            r#"{"type":"final","content":"done"}"#,
+        ]);
+        let tools = MockToolPort::with_tool_and_results(
+            "tool_a",
+            vec![
+                Ok(ToolResult {
+                    name: "tool_a".to_string(),
+                    output: serde_json::json!({"ok": 1}),
+                    is_error: false,
+                }),
+                Ok(ToolResult {
+                    name: "tool_b".to_string(),
+                    output: serde_json::json!({"ok": 2}),
+                    is_error: false,
+                }),
+                Ok(ToolResult {
+                    name: "tool_a".to_string(),
+                    output: serde_json::json!({"ok": 3}),
+                    is_error: false,
+                }),
+            ],
+        );
+        let store = MemoryStore::new();
+        let sink = CollectingSink::new();
+
+        let result = run_turn(
+            &llm,
+            &tools,
+            &store,
+            &sink,
+            make_request("repeat searches"),
+            &generous_policy(),
+            "test-model",
+        )
+        .await;
+        assert!(matches!(&result, Ok(AgentRunResult::Finished(_))), "unexpected {result:?}");
+        let resp = match result {
+            Ok(AgentRunResult::Finished(resp)) => resp,
+            _ => return,
+        };
+
+        assert_eq!(resp.tool_transcript.len(), 3);
+        assert!(resp.tool_transcript.iter().all(|entry| !entry.is_error));
+    }
+
+    #[tokio::test]
+    async fn tc20_excessive_consecutive_duplicate_tool_calls_are_blocked() {
+        let llm = SequentialLlm::from_contents(vec![
+            r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
+            r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
+            r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
+            r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
+            r#"{"type":"final","content":"done"}"#,
+        ]);
+        let tools = MockToolPort::with_tool_and_results(
+            "tool_a",
+            vec![
+                Ok(ToolResult {
+                    name: "tool_a".to_string(),
+                    output: serde_json::json!({"ok": 1}),
+                    is_error: false,
+                }),
+                Ok(ToolResult {
+                    name: "tool_a".to_string(),
+                    output: serde_json::json!({"ok": 2}),
+                    is_error: false,
+                }),
+                Ok(ToolResult {
+                    name: "tool_a".to_string(),
+                    output: serde_json::json!({"ok": 3}),
+                    is_error: false,
+                }),
+            ],
+        );
+        let store = MemoryStore::new();
+        let sink = CollectingSink::new();
+
+        let result = run_turn(
+            &llm,
+            &tools,
+            &store,
+            &sink,
+            make_request("poll repeatedly"),
+            &generous_policy(),
+            "test-model",
+        )
+        .await;
+        assert!(matches!(&result, Ok(AgentRunResult::Finished(_))), "unexpected {result:?}");
+        let resp = match result {
+            Ok(AgentRunResult::Finished(resp)) => resp,
+            _ => return,
+        };
+
+        assert_eq!(resp.tool_transcript.len(), 4);
+        assert!(!resp.tool_transcript[2].is_error);
+        assert!(resp.tool_transcript[3].is_error);
+        assert!(
+            resp.tool_transcript[3]
+                .output
+                .to_string()
+                .contains("consecutive duplicate tool call limit reached"),
+            "expected duplicate-call protection error in transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn tc21_duplicate_block_path_records_artifact_and_cost() {
+        let llm = SequentialLlm::from_contents(vec![
+            r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
+            r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
+            r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
+            r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
+            r#"{"type":"final","content":"done"}"#,
+        ]);
+        let tools = MockToolPort::with_tool_and_results(
+            "tool_a",
+            vec![
+                Ok(ToolResult {
+                    name: "tool_a".to_string(),
+                    output: serde_json::json!({"ok": 1}),
+                    is_error: false,
+                }),
+                Ok(ToolResult {
+                    name: "tool_a".to_string(),
+                    output: serde_json::json!({"ok": 2}),
+                    is_error: false,
+                }),
+                Ok(ToolResult {
+                    name: "tool_a".to_string(),
+                    output: serde_json::json!({"ok": 3}),
+                    is_error: false,
+                }),
+            ],
+        );
+        let store = MemoryStore::new();
+        let sink = CollectingSink::new();
+        let checkpoint = CountingCheckpointPort::new();
+        let artifacts = CountingArtifactStore::new();
+        let cost = CountingCostMeter::new();
+        let policy = AllowAllPolicyPort;
+        let approval = AlwaysApprovePort;
+
+        let result = run_turn_with_extensions(
+            &llm,
+            &tools,
+            &store,
+            &sink,
+            make_request("poll repeatedly"),
+            &generous_policy(),
+            "test-model",
+            &policy,
+            &approval,
+            crate::DispatchMode::PromptGuided,
+            &checkpoint,
+            &artifacts,
+            &cost,
+        )
+        .await;
+        assert!(matches!(&result, Ok(AgentRunResult::Finished(_))), "unexpected {result:?}");
+
+        let tool_results = *cost.tool_results.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(tool_results, 4, "cost meter should record all tool outcomes");
+        let saved_artifacts = artifacts.saved.lock().unwrap_or_else(|p| p.into_inner()).len();
+        assert_eq!(saved_artifacts, 4, "artifact store should record all tool outcomes");
     }
 }

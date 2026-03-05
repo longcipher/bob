@@ -134,6 +134,10 @@ type = "directory"
 path = "./skills"
 recursive = false
 
+# Optional: Persist session state/checkpoints/artifacts across restarts
+[store]
+path = "./.bob/sessions"
+
 # Optional: Configure policies
 [policy]
 deny_tools = ["local/shell_exec"]
@@ -149,6 +153,10 @@ deny_tools = ["local/shell_exec"]
 [cost]
 session_token_budget = 10000
 ```
+
+When `[store]` is configured, Bob persists session snapshots, checkpoints,
+artifacts, and cost-meter usage counters to disk. Corrupted snapshots are
+quarantined (`*.corrupt.*`) and ignored so startup remains resilient.
 
 ### Environment Variables
 

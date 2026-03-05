@@ -118,11 +118,21 @@ In-memory session storage for development and testing:
 - No external dependencies
 - Suitable for single-instance deployments
 
+Additional durable storage adapter:
+
+- `store_file::FileSessionStore`: persists per-session JSON snapshots to disk.
+
 ### Runtime Extension Adapters
 
 - `checkpoint_memory::InMemoryCheckpointStore`: per-session turn checkpoints
+- `checkpoint_file::FileCheckpointStore`: durable checkpoint snapshots on disk
 - `artifact_memory::InMemoryArtifactStore`: per-session tool-result artifacts
+- `artifact_file::FileArtifactStore`: durable artifact snapshots on disk
 - `cost_simple::SimpleCostMeter`: optional per-session token budget enforcement
+- `cost_file::FileCostMeter`: durable per-session budget accounting (token/tool usage) on disk
+
+Durable stores (`*_file`) automatically quarantine corrupted JSON snapshots into
+`*.corrupt.*` files and continue with empty state instead of failing hard.
 
 ### Runtime Guardrail Adapters
 

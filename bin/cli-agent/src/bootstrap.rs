@@ -2,8 +2,11 @@ use std::sync::Arc;
 
 use bob_adapters::{
     approval_static::{StaticApprovalMode, StaticApprovalPort},
+    artifact_file::FileArtifactStore,
     artifact_memory::InMemoryArtifactStore,
+    checkpoint_file::FileCheckpointStore,
     checkpoint_memory::InMemoryCheckpointStore,
+    cost_file::FileCostMeter,
     cost_simple::SimpleCostMeter,
     observe::TracingEventSink,
     policy_static::StaticToolPolicyPort,
@@ -34,14 +37,24 @@ pub(crate) struct SkillsRuntimeContext {
 /// Build the runtime from a loaded config.
 pub(crate) async fn build_runtime(
     cfg: &AgentConfig,
-) -> eyre::Result<(Arc<dyn AgentRuntime>, Option<SkillsRuntimeContext>)> {
+) -> eyre::Result<(
+    Arc<dyn AgentRuntime>,
+    Arc<dyn bob_adapters::core::ports::ToolPort>,
+    Option<SkillsRuntimeContext>,
+)> {
     let client = genai::Client::default();
     let llm: Arc<dyn bob_adapters::core::ports::LlmPort> =
         Arc::new(bob_adapters::llm_genai::GenAiLlmAdapter::new(client));
 
     let tools = build_tool_port(cfg).await?;
-    let store: Arc<dyn bob_adapters::core::ports::SessionStore> =
-        Arc::new(InMemorySessionStore::new());
+    let store_root = resolve_store_root(cfg)?;
+    let store = build_session_store(store_root.as_deref())?;
+    let checkpoint_store = build_checkpoint_store(store_root.as_deref())?;
+    let artifact_store = build_artifact_store(store_root.as_deref())?;
+    let cost_meter = build_cost_meter(
+        store_root.as_deref(),
+        cfg.cost.as_ref().and_then(|cost| cost.session_token_budget),
+    )?;
     let events: Arc<dyn bob_adapters::core::ports::EventSink> = Arc::new(TracingEventSink::new());
 
     let tool_timeout_ms = cfg.mcp.as_ref().map_or(DEFAULT_TOOL_TIMEOUT_MS, |mcp_cfg| {
@@ -62,7 +75,7 @@ pub(crate) async fn build_runtime(
 
     let runtime = RuntimeBuilder::new()
         .with_llm(llm)
-        .with_tools(tools)
+        .with_tools(tools.clone())
         .with_store(store)
         .with_events(events)
         .with_default_model(cfg.runtime.default_model.clone())
@@ -70,16 +83,72 @@ pub(crate) async fn build_runtime(
         .with_tool_policy(build_tool_policy_port(cfg))
         .with_approval(build_approval_port(cfg))
         .with_dispatch_mode(resolve_dispatch_mode(&cfg.runtime))
-        .with_checkpoint_store(Arc::new(InMemoryCheckpointStore::new()))
-        .with_artifact_store(Arc::new(InMemoryArtifactStore::new()))
-        .with_cost_meter(Arc::new(SimpleCostMeter::new(
-            cfg.cost.as_ref().and_then(|cost| cost.session_token_budget),
-        )))
+        .with_checkpoint_store(checkpoint_store)
+        .with_artifact_store(artifact_store)
+        .with_cost_meter(cost_meter)
         .build()
         .wrap_err("failed to build runtime")?;
 
     let skills_context = build_skills_composer(cfg)?;
-    Ok((runtime, skills_context))
+    Ok((runtime, tools, skills_context))
+}
+
+fn build_session_store(
+    store_root: Option<&std::path::Path>,
+) -> eyre::Result<Arc<dyn bob_adapters::core::ports::SessionStore>> {
+    let Some(path) = store_root else {
+        return Ok(Arc::new(InMemorySessionStore::new()));
+    };
+
+    let store = bob_adapters::store_file::FileSessionStore::new(path.to_path_buf())
+        .wrap_err("failed to initialize file-backed session store")?;
+    Ok(Arc::new(store))
+}
+
+fn build_checkpoint_store(
+    store_root: Option<&std::path::Path>,
+) -> eyre::Result<Arc<dyn bob_adapters::core::ports::TurnCheckpointStorePort>> {
+    let Some(path) = store_root else {
+        return Ok(Arc::new(InMemoryCheckpointStore::new()));
+    };
+
+    let store = FileCheckpointStore::new(path.join("checkpoints"))
+        .wrap_err("failed to initialize file-backed checkpoint store")?;
+    Ok(Arc::new(store))
+}
+
+fn build_artifact_store(
+    store_root: Option<&std::path::Path>,
+) -> eyre::Result<Arc<dyn bob_adapters::core::ports::ArtifactStorePort>> {
+    let Some(path) = store_root else {
+        return Ok(Arc::new(InMemoryArtifactStore::new()));
+    };
+
+    let store = FileArtifactStore::new(path.join("artifacts"))
+        .wrap_err("failed to initialize file-backed artifact store")?;
+    Ok(Arc::new(store))
+}
+
+fn build_cost_meter(
+    store_root: Option<&std::path::Path>,
+    session_token_budget: Option<u64>,
+) -> eyre::Result<Arc<dyn bob_adapters::core::ports::CostMeterPort>> {
+    let Some(path) = store_root else {
+        return Ok(Arc::new(SimpleCostMeter::new(session_token_budget)));
+    };
+
+    let meter = FileCostMeter::new(path.join("cost"), session_token_budget)
+        .wrap_err("failed to initialize file-backed cost meter")?;
+    Ok(Arc::new(meter))
+}
+
+fn resolve_store_root(cfg: &AgentConfig) -> eyre::Result<Option<std::path::PathBuf>> {
+    let Some(store_cfg) = cfg.store.as_ref() else {
+        return Ok(None);
+    };
+    let resolved_path =
+        resolve_env_placeholders(&store_cfg.path).wrap_err("failed to resolve store.path")?;
+    Ok(Some(std::path::PathBuf::from(resolved_path)))
 }
 
 async fn build_tool_port(
@@ -239,7 +308,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AgentConfig, ApprovalConfig, ApprovalMode, PolicyConfig, RuntimeConfig,
-        RuntimeDispatchMode, SkillSourceEntry,
+        RuntimeDispatchMode, SkillSourceEntry, StoreConfig,
     };
 
     fn minimal_agent_config() -> AgentConfig {
@@ -252,6 +321,7 @@ mod tests {
                 dispatch_mode: None,
             },
             llm: None,
+            store: None,
             policy: None,
             approval: None,
             mcp: None,
@@ -371,5 +441,101 @@ mod tests {
             decision.ok(),
             Some(bob_runtime::core::types::ApprovalDecision::Denied { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn file_session_store_can_be_selected_from_config() -> eyre::Result<()> {
+        let mut cfg = minimal_agent_config();
+        let dir = std::env::temp_dir().join(format!("bob-store-{}", std::process::id()));
+        cfg.store = Some(StoreConfig { path: dir.display().to_string() });
+
+        let store_root = resolve_store_root(&cfg)?;
+        let store = build_session_store(store_root.as_deref())?;
+        let session_id = "store-test".to_string();
+        store.save(&session_id, &bob_runtime::core::types::SessionState::default()).await?;
+        let loaded = store.load(&session_id).await?;
+        assert!(loaded.is_some(), "file-backed store should persist and load sessions");
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+        Ok(())
+    }
+
+    #[test]
+    fn missing_store_env_placeholder_is_rejected() {
+        let mut cfg = minimal_agent_config();
+        cfg.store = Some(StoreConfig { path: "${__BOB_MISSING_STORE_PATH__}".to_string() });
+        let result = resolve_store_root(&cfg);
+        assert!(result.is_err(), "missing env in store.path should fail early");
+    }
+
+    #[tokio::test]
+    async fn file_checkpoint_and_artifact_stores_can_be_selected() -> eyre::Result<()> {
+        let mut cfg = minimal_agent_config();
+        let dir = std::env::temp_dir().join(format!("bob-store-artifacts-{}", std::process::id()));
+        cfg.store = Some(StoreConfig { path: dir.display().to_string() });
+
+        let store_root = resolve_store_root(&cfg)?;
+        let checkpoints = build_checkpoint_store(store_root.as_deref())?;
+        let artifacts = build_artifact_store(store_root.as_deref())?;
+
+        checkpoints
+            .save_checkpoint(&bob_runtime::core::types::TurnCheckpoint {
+                session_id: "s1".to_string(),
+                step: 1,
+                tool_calls: 0,
+                usage: bob_runtime::core::types::TokenUsage::default(),
+            })
+            .await?;
+        artifacts
+            .put(bob_runtime::core::types::ArtifactRecord {
+                session_id: "s1".to_string(),
+                kind: "tool_result".to_string(),
+                name: "search".to_string(),
+                content: serde_json::json!({"hits": 1}),
+            })
+            .await?;
+
+        let loaded_cp = checkpoints.load_latest(&"s1".to_string()).await?;
+        let loaded_artifacts = artifacts.list_by_session(&"s1".to_string()).await?;
+        assert!(loaded_cp.is_some(), "checkpoint should persist");
+        assert_eq!(loaded_artifacts.len(), 1, "artifact should persist");
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_cost_meter_can_be_selected_and_persists_usage() -> eyre::Result<()> {
+        let mut cfg = minimal_agent_config();
+        let dir = std::env::temp_dir().join(format!("bob-store-cost-{}", std::process::id()));
+        cfg.store = Some(StoreConfig { path: dir.display().to_string() });
+
+        let session_id = "s1".to_string();
+        let budget = Some(20);
+        let store_root = resolve_store_root(&cfg)?;
+
+        let first = build_cost_meter(store_root.as_deref(), budget)?;
+        first
+            .record_llm_usage(
+                &session_id,
+                "openai:gpt-4o-mini",
+                &bob_runtime::core::types::TokenUsage { prompt_tokens: 10, completion_tokens: 0 },
+            )
+            .await?;
+
+        let second = build_cost_meter(store_root.as_deref(), budget)?;
+        let overflow = second
+            .record_llm_usage(
+                &session_id,
+                "openai:gpt-4o-mini",
+                &bob_runtime::core::types::TokenUsage { prompt_tokens: 11, completion_tokens: 0 },
+            )
+            .await;
+        assert!(overflow.is_err(), "usage should exceed persisted budget");
+        let msg = overflow.err().map(|err| err.to_string()).unwrap_or_default();
+        assert!(msg.contains("budget exceeded"));
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+        Ok(())
     }
 }
