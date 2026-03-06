@@ -6,14 +6,12 @@ mod bootstrap;
 mod config;
 mod request_context;
 
-use std::sync::Arc;
-
-use bob_runtime::{AgentRuntime, core::ports::ToolPort};
+use bob_runtime::agent_loop::{AgentLoop, AgentLoopOutput, help_text};
 use clap::Parser;
 use eyre::WrapErr;
 
 use crate::{
-    bootstrap::{SkillsRuntimeContext, build_runtime},
+    bootstrap::{CliRuntimeHandles, SkillsRuntimeContext, build_runtime},
     request_context::build_request_context,
 };
 
@@ -29,27 +27,15 @@ struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReplCommand {
     Help,
-    Quit,
     NewSession,
-    Tools,
-    ToolDescribe { name: String },
 }
 
 fn parse_repl_command(input: &str) -> Option<ReplCommand> {
     let trimmed = input.trim();
-    if !trimmed.starts_with('/') {
-        return None;
-    }
-
     match trimmed {
         "/help" | "/h" => Some(ReplCommand::Help),
-        "/quit" | "/exit" => Some(ReplCommand::Quit),
         "/new" | "/reset" => Some(ReplCommand::NewSession),
-        "/tools" => Some(ReplCommand::Tools),
-        "/tool.describe" => Some(ReplCommand::ToolDescribe { name: String::new() }),
-        _ => trimmed
-            .strip_prefix("/tool.describe ")
-            .map(|name| ReplCommand::ToolDescribe { name: name.trim().to_string() }),
+        _ => None,
     }
 }
 
@@ -57,14 +43,13 @@ fn parse_repl_command(input: &str) -> Option<ReplCommand> {
 fn print_help() {
     println!(
         "\
-Commands:
+CLI session commands:
   /help, /h             Show this help message
-  /tools                List available tools
-  /tool.describe <name> Show a tool schema
   /new, /reset          Start a new session context
-  /quit, /exit          Exit the CLI
 
-Any other input is sent to the model."
+{}
+",
+        help_text()
     );
 }
 
@@ -75,8 +60,7 @@ Any other input is sent to the model."
     reason = "CLI REPL must use stdout/stderr for user interaction"
 )]
 async fn repl(
-    runtime: Arc<dyn AgentRuntime>,
-    tools: Arc<dyn ToolPort>,
+    agent_loop: AgentLoop,
     model: &str,
     skills_context: Option<&SkillsRuntimeContext>,
     policy: Option<&config::PolicyConfig>,
@@ -116,71 +100,34 @@ async fn repl(
                     print_help();
                     continue;
                 }
-                ReplCommand::Quit => break,
                 ReplCommand::NewSession => {
                     session_seq = session_seq.saturating_add(1);
                     session_id = format!("cli-session-{session_seq}");
                     eprintln!("Started new session: {session_id}");
                     continue;
                 }
-                ReplCommand::Tools => {
-                    match tools.list_tools().await {
-                        Ok(available) if available.is_empty() => println!("(no tools available)"),
-                        Ok(available) => {
-                            println!("Available tools:");
-                            for tool in available {
-                                println!("- {}: {}", tool.id, tool.description);
-                            }
-                        }
-                        Err(err) => eprintln!("Failed to list tools: {err}"),
-                    }
-                    continue;
-                }
-                ReplCommand::ToolDescribe { name } => {
-                    if name.is_empty() {
-                        eprintln!("Usage: /tool.describe <tool-name>");
-                        continue;
-                    }
-                    match tools.list_tools().await {
-                        Ok(available) => {
-                            if let Some(tool) = available.iter().find(|tool| tool.id == name) {
-                                println!(
-                                    "Tool: {}\nDescription: {}\nSource: {:?}\nSchema:\n{}",
-                                    tool.id,
-                                    tool.description,
-                                    tool.source,
-                                    serde_json::to_string_pretty(&tool.input_schema)
-                                        .unwrap_or_default()
-                                );
-                            } else {
-                                eprintln!(
-                                    "Tool '{name}' not found. Use /tools to inspect choices."
-                                );
-                            }
-                        }
-                        Err(err) => eprintln!("Failed to describe tool: {err}"),
-                    }
-                    continue;
-                }
             }
         }
 
         let context = build_request_context(&input, skills_context, policy);
-
-        let req = bob_runtime::core::types::AgentRequest {
-            input,
-            session_id: session_id.clone(),
-            model: None,
-            context,
-            cancel_token: None,
-        };
-
-        match runtime.run(req).await {
-            Ok(bob_runtime::core::types::AgentRunResult::Finished(resp)) => {
+        match agent_loop.handle_input_with_context(&input, &session_id, context).await {
+            Ok(AgentLoopOutput::Response(bob_runtime::core::types::AgentRunResult::Finished(
+                resp,
+            ))) => {
                 println!("{}", resp.content);
+                println!(
+                    "\n[usage] prompt={} completion={} total={}",
+                    resp.usage.prompt_tokens,
+                    resp.usage.completion_tokens,
+                    resp.usage.total()
+                );
             }
-            Err(e) => {
-                eprintln!("Error: {e}");
+            Ok(AgentLoopOutput::CommandOutput(output)) => {
+                println!("{output}");
+            }
+            Ok(AgentLoopOutput::Quit) => break,
+            Err(err) => {
+                eprintln!("Error: {err}");
             }
         }
     }
@@ -202,8 +149,11 @@ async fn main() -> eyre::Result<()> {
     let cfg = config::load_config(&cli.config)
         .wrap_err_with(|| format!("failed to load config from '{}'", cli.config))?;
 
-    let (runtime, tools, skills_context) = build_runtime(&cfg).await?;
-    repl(runtime, tools, &cfg.runtime.default_model, skills_context.as_ref(), cfg.policy.as_ref())
+    let CliRuntimeHandles { runtime, tools, store, tape, skills_context } =
+        build_runtime(&cfg).await?;
+    let agent_loop =
+        AgentLoop::new(runtime.clone(), tools.clone()).with_store(store).with_tape(tape);
+    repl(agent_loop, &cfg.runtime.default_model, skills_context.as_ref(), cfg.policy.as_ref())
         .await;
     Ok(())
 }
@@ -219,23 +169,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_describe_command() {
-        assert_eq!(
-            parse_repl_command("/tool.describe mcp/filesystem/read_file"),
-            Some(ReplCommand::ToolDescribe { name: "mcp/filesystem/read_file".to_string() })
-        );
-    }
-
-    #[test]
-    fn parse_tool_describe_requires_separator() {
-        assert_eq!(parse_repl_command("/tool.describefoo"), None);
-        assert_eq!(
-            parse_repl_command("/tool.describe"),
-            Some(ReplCommand::ToolDescribe { name: String::new() })
-        );
-    }
-
-    #[test]
     fn parse_new_session_commands() {
         assert_eq!(parse_repl_command("/new"), Some(ReplCommand::NewSession));
         assert_eq!(parse_repl_command("/reset"), Some(ReplCommand::NewSession));
@@ -244,5 +177,6 @@ mod tests {
     #[test]
     fn non_command_input_returns_none() {
         assert_eq!(parse_repl_command("hello"), None);
+        assert_eq!(parse_repl_command("/tools"), None);
     }
 }

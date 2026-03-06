@@ -8,10 +8,11 @@ use bob_adapters::{
     checkpoint_memory::InMemoryCheckpointStore,
     cost_file::FileCostMeter,
     cost_simple::SimpleCostMeter,
-    observe::TracingEventSink,
+    observe::{FanoutEventSink, TracingEventSink},
     policy_static::StaticToolPolicyPort,
     skills_agent::{SkillPromptComposer, SkillSelectionPolicy, SkillSourceConfig},
     store_memory::InMemorySessionStore,
+    tape_memory::InMemoryTapeStore,
 };
 use bob_runtime::{
     AgentBootstrap, AgentRuntime, NoOpToolPort, RuntimeBuilder, TimeoutToolLayer, ToolLayer,
@@ -34,14 +35,16 @@ pub(crate) struct SkillsRuntimeContext {
     pub selection_policy: SkillSelectionPolicy,
 }
 
+pub(crate) struct CliRuntimeHandles {
+    pub runtime: Arc<dyn AgentRuntime>,
+    pub tools: Arc<dyn bob_adapters::core::ports::ToolPort>,
+    pub store: Arc<dyn bob_adapters::core::ports::SessionStore>,
+    pub tape: Arc<dyn bob_adapters::core::ports::TapeStorePort>,
+    pub skills_context: Option<SkillsRuntimeContext>,
+}
+
 /// Build the runtime from a loaded config.
-pub(crate) async fn build_runtime(
-    cfg: &AgentConfig,
-) -> eyre::Result<(
-    Arc<dyn AgentRuntime>,
-    Arc<dyn bob_adapters::core::ports::ToolPort>,
-    Option<SkillsRuntimeContext>,
-)> {
+pub(crate) async fn build_runtime(cfg: &AgentConfig) -> eyre::Result<CliRuntimeHandles> {
     let client = genai::Client::default();
     let llm: Arc<dyn bob_adapters::core::ports::LlmPort> =
         Arc::new(bob_adapters::llm_genai::GenAiLlmAdapter::new(client));
@@ -49,13 +52,17 @@ pub(crate) async fn build_runtime(
     let tools = build_tool_port(cfg).await?;
     let store_root = resolve_store_root(cfg)?;
     let store = build_session_store(store_root.as_deref())?;
+    let tape = build_tape_store();
     let checkpoint_store = build_checkpoint_store(store_root.as_deref())?;
     let artifact_store = build_artifact_store(store_root.as_deref())?;
     let cost_meter = build_cost_meter(
         store_root.as_deref(),
         cfg.cost.as_ref().and_then(|cost| cost.session_token_budget),
     )?;
-    let events: Arc<dyn bob_adapters::core::ports::EventSink> = Arc::new(TracingEventSink::new());
+    let tracing_sink: Arc<dyn bob_adapters::core::ports::EventSink> =
+        Arc::new(TracingEventSink::new());
+    let events: Arc<dyn bob_adapters::core::ports::EventSink> =
+        Arc::new(FanoutEventSink::new().with_sink(tracing_sink));
 
     let tool_timeout_ms = cfg.mcp.as_ref().map_or(DEFAULT_TOOL_TIMEOUT_MS, |mcp_cfg| {
         mcp_cfg
@@ -76,7 +83,7 @@ pub(crate) async fn build_runtime(
     let runtime = RuntimeBuilder::new()
         .with_llm(llm)
         .with_tools(tools.clone())
-        .with_store(store)
+        .with_store(store.clone())
         .with_events(events)
         .with_default_model(cfg.runtime.default_model.clone())
         .with_policy(policy)
@@ -90,7 +97,7 @@ pub(crate) async fn build_runtime(
         .wrap_err("failed to build runtime")?;
 
     let skills_context = build_skills_composer(cfg)?;
-    Ok((runtime, tools, skills_context))
+    Ok(CliRuntimeHandles { runtime, tools, store, tape, skills_context })
 }
 
 fn build_session_store(
@@ -103,6 +110,10 @@ fn build_session_store(
     let store = bob_adapters::store_file::FileSessionStore::new(path.to_path_buf())
         .wrap_err("failed to initialize file-backed session store")?;
     Ok(Arc::new(store))
+}
+
+fn build_tape_store() -> Arc<dyn bob_adapters::core::ports::TapeStorePort> {
+    Arc::new(InMemoryTapeStore::new())
 }
 
 fn build_checkpoint_store(
@@ -424,10 +435,7 @@ mod tests {
         let approval_port = build_approval_port(&cfg);
         let decision = approval_port
             .approve_tool_call(
-                &bob_runtime::core::types::ToolCall {
-                    name: "local/read_file".to_string(),
-                    arguments: Default::default(),
-                },
+                &bob_runtime::core::types::ToolCall::new("local/read_file", Default::default()),
                 &bob_runtime::core::types::ApprovalContext {
                     session_id: "s1".to_string(),
                     turn_step: 1,

@@ -18,7 +18,7 @@ This crate intentionally contains **no concrete implementations** — only contr
 
 ## Architecture
 
-The crate defines four primary port traits:
+The crate defines four primary port traits and several extension boundaries:
 
 1. **`LlmPort`** - Interface for language model interactions
 2. **`ToolPort`** - Interface for tool/system operations
@@ -31,7 +31,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bob-core = "0.1"
+bob-core = "0.2.1"
 ```
 
 ### Example: Implementing a Custom LLM Adapter

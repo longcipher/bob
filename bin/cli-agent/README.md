@@ -8,7 +8,7 @@ CLI agent for the [Bob Agent Framework](https://github.com/longcipher/bob).
 
 `bob-cli` is a command-line interface for Bob, a general-purpose AI agent framework. It provides:
 
-- **Interactive REPL**: Chat with the AI agent through a terminal interface
+- **Interactive REPL**: Chat through `AgentLoop` with built-in slash commands and session reset shortcuts
 - **Multi-Model Support**: Works with OpenAI, Anthropic, Google, and other LLM providers
 - **Tool Integration**: Connect to MCP servers for file operations, shell commands, and more
 - **Skill System**: Load and apply predefined skills for specialized tasks
@@ -114,7 +114,7 @@ The agent will start an interactive REPL:
 
 ```text
 Bob agent ready  (model: openai:gpt-4o-mini)
-Type a message and press Enter. /quit to exit.
+Type a message and press Enter. /help for commands.
 
 > Summarize the latest meeting notes in this folder
 ```
@@ -124,8 +124,10 @@ Type a message and press Enter. /quit to exit.
 - Type your message and press **Enter** to send
 - `/quit` or `/exit` to exit the agent
 - `/help` or `/h` to show available commands
+- `/usage` to inspect cumulative session token usage
 - `/tools` to list all available tools
 - `/tool.describe <tool-name>` to print a tool schema
+- `/tape.info`, `/tape.search <query>`, `/anchors`, and `/handoff [name]` for session tape inspection
 - `/new` or `/reset` to start a fresh session context
 
 ### Example Session

@@ -218,7 +218,7 @@ mod tests {
         };
         let session_id = "cli/session:1".to_string();
         let state = SessionState {
-            messages: vec![Message { role: Role::User, content: "hello".to_string() }],
+            messages: vec![Message::text(Role::User, "hello")],
             total_usage: bob_core::types::TokenUsage { prompt_tokens: 4, completion_tokens: 2 },
         };
 

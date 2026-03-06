@@ -28,10 +28,32 @@
 //! let request = build_llm_request("openai:gpt-4o-mini", &session, &tools, "You are helpful.");
 //! ```
 
-use bob_core::types::{LlmRequest, Message, Role, SessionState, ToolDescriptor};
+use bob_core::{
+    ports::ContextCompactorPort,
+    types::{LlmRequest, Message, Role, SessionState, ToolDescriptor},
+};
 
 /// Maximum number of non-system history messages to keep.
 const MAX_HISTORY: usize = 50;
+
+/// Deterministic default compactor that preserves the existing 50-message window behavior.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WindowContextCompactor {
+    max_history: usize,
+}
+
+impl Default for WindowContextCompactor {
+    fn default() -> Self {
+        Self { max_history: MAX_HISTORY }
+    }
+}
+
+#[async_trait::async_trait]
+impl ContextCompactorPort for WindowContextCompactor {
+    async fn compact(&self, session: &SessionState) -> Vec<Message> {
+        truncate_history(&session.messages, self.max_history)
+    }
+}
 
 /// Options controlling prompt shape for different dispatch strategies.
 #[derive(Debug, Clone, Copy)]
@@ -91,11 +113,12 @@ pub(crate) fn tool_schema_block(tools: &[ToolDescriptor]) -> String {
         reason = "compatibility wrapper retained for callers that use default prompt build options"
     )
 )]
-pub(crate) fn build_llm_request(
+pub(crate) async fn build_llm_request(
     model: &str,
     session: &SessionState,
     tools: &[ToolDescriptor],
     system_instructions: &str,
+    compactor: &dyn ContextCompactorPort,
 ) -> LlmRequest {
     build_llm_request_with_options(
         model,
@@ -103,16 +126,19 @@ pub(crate) fn build_llm_request(
         tools,
         system_instructions,
         PromptBuildOptions::default(),
+        compactor,
     )
+    .await
 }
 
 /// Assembles an `LlmRequest` with configurable schema/tool prompt sections.
-pub(crate) fn build_llm_request_with_options(
+pub(crate) async fn build_llm_request_with_options(
     model: &str,
     session: &SessionState,
     tools: &[ToolDescriptor],
     system_instructions: &str,
     options: PromptBuildOptions,
+    compactor: &dyn ContextCompactorPort,
 ) -> LlmRequest {
     // -- system message --------------------------------------------------
     let mut system_content = system_instructions.to_string();
@@ -128,10 +154,10 @@ pub(crate) fn build_llm_request_with_options(
         system_content.push_str(&tool_block);
     }
 
-    let system_msg = Message { role: Role::System, content: system_content };
+    let system_msg = Message::text(Role::System, system_content);
 
     // -- history (truncated) ---------------------------------------------
-    let history = truncate_history(&session.messages, MAX_HISTORY);
+    let history = compactor.compact(session).await;
 
     // -- assemble --------------------------------------------------------
     let mut messages = Vec::with_capacity(1 + history.len());
@@ -171,7 +197,15 @@ pub(crate) fn truncate_history(messages: &[Message], max: usize) -> Vec<Message>
 
 #[cfg(test)]
 mod tests {
-    use bob_core::types::{SessionState, TokenUsage, ToolSource};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use bob_core::{
+        ports::ContextCompactorPort,
+        types::{SessionState, TokenUsage, ToolSource},
+    };
     use serde_json::json;
 
     use super::*;
@@ -188,7 +222,7 @@ mod tests {
     }
 
     fn msg(role: Role, content: &str) -> Message {
-        Message { role, content: content.to_string() }
+        Message::text(role, content.to_string())
     }
 
     // ── action_schema_prompt ─────────────────────────────────────────
@@ -349,10 +383,17 @@ mod tests {
 
     // ── build_llm_request ────────────────────────────────────────────
 
-    #[test]
-    fn prompt_build_empty_session() {
+    #[tokio::test]
+    async fn prompt_build_empty_session() {
         let session = SessionState::default();
-        let req = build_llm_request("test-model", &session, &[], "You are Bob.");
+        let req = build_llm_request(
+            "test-model",
+            &session,
+            &[],
+            "You are Bob.",
+            &WindowContextCompactor::default(),
+        )
+        .await;
         assert_eq!(req.model, "test-model");
         // First message must be system.
         assert_eq!(req.messages[0].role, Role::System);
@@ -362,42 +403,94 @@ mod tests {
         assert!(req.tools.is_empty());
     }
 
-    #[test]
-    fn prompt_build_system_contains_action_schema() {
+    #[tokio::test]
+    async fn prompt_build_system_contains_action_schema() {
         let session = SessionState::default();
-        let req = build_llm_request("m", &session, &[], "instructions");
+        let req = build_llm_request(
+            "m",
+            &session,
+            &[],
+            "instructions",
+            &WindowContextCompactor::default(),
+        )
+        .await;
         assert!(req.messages[0].content.contains("JSON"));
         assert!(req.messages[0].content.contains("tool_call"));
     }
 
-    #[test]
-    fn prompt_build_includes_tools() {
+    #[tokio::test]
+    async fn prompt_build_includes_tools() {
         let tools = vec![make_tool("t1")];
         let session = SessionState::default();
-        let req = build_llm_request("m", &session, &tools, "inst");
+        let req =
+            build_llm_request("m", &session, &tools, "inst", &WindowContextCompactor::default())
+                .await;
         assert_eq!(req.tools.len(), 1);
         assert!(req.messages[0].content.contains("t1"));
     }
 
-    #[test]
-    fn prompt_build_message_ordering() {
+    #[tokio::test]
+    async fn prompt_build_message_ordering() {
         let session = SessionState {
             messages: vec![msg(Role::User, "hello"), msg(Role::Assistant, "hi")],
             total_usage: TokenUsage::default(),
         };
-        let req = build_llm_request("m", &session, &[], "sys");
+        let req =
+            build_llm_request("m", &session, &[], "sys", &WindowContextCompactor::default()).await;
         assert_eq!(req.messages[0].role, Role::System);
         assert_eq!(req.messages[1].role, Role::User);
         assert_eq!(req.messages[2].role, Role::Assistant);
     }
 
-    #[test]
-    fn prompt_build_truncates_long_history() {
+    #[tokio::test]
+    async fn prompt_build_truncates_long_history() {
         let messages: Vec<Message> = (0..60).map(|i| msg(Role::User, &format!("m-{i}"))).collect();
         let session = SessionState { messages, total_usage: TokenUsage::default() };
-        let req = build_llm_request("m", &session, &[], "sys");
+        let req =
+            build_llm_request("m", &session, &[], "sys", &WindowContextCompactor::default()).await;
         // 1 system + 50 truncated history = 51
         assert_eq!(req.messages.len(), 51);
         assert_eq!(req.messages[0].role, Role::System);
+    }
+
+    struct RecordingCompactor {
+        invocations: AtomicUsize,
+        compacted: Vec<Message>,
+    }
+
+    #[async_trait::async_trait]
+    impl ContextCompactorPort for RecordingCompactor {
+        async fn compact(&self, _session: &SessionState) -> Vec<Message> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            self.compacted.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_build_uses_injected_compactor_output() {
+        let session = SessionState {
+            messages: vec![
+                msg(Role::User, "drop-me"),
+                msg(Role::Assistant, "drop-me-too"),
+                msg(Role::User, "keep-me"),
+            ],
+            total_usage: TokenUsage::default(),
+        };
+        let compactor = Arc::new(RecordingCompactor {
+            invocations: AtomicUsize::new(0),
+            compacted: vec![msg(Role::Assistant, "compacted-history")],
+        });
+
+        let req = build_llm_request("m", &session, &[], "sys", compactor.as_ref()).await;
+
+        assert_eq!(compactor.invocations.load(Ordering::SeqCst), 1);
+        assert!(
+            req.messages.iter().any(|message| message.content == "compacted-history"),
+            "compactor output should be used in the request"
+        );
+        assert!(
+            !req.messages.iter().any(|message| message.content == "drop-me"),
+            "raw session history should not bypass the compactor"
+        );
     }
 }

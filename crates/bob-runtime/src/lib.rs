@@ -92,8 +92,8 @@ pub use bob_core as core;
 use bob_core::{
     error::{AgentError, CostError, StoreError, ToolError},
     ports::{
-        ApprovalPort, ArtifactStorePort, CostMeterPort, EventSink, LlmPort, SessionStore,
-        ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
+        ApprovalPort, ArtifactStorePort, ContextCompactorPort, CostMeterPort, EventSink, LlmPort,
+        SessionStore, ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
     },
     types::{
         AgentEventStream, AgentRequest, AgentRunResult, ApprovalContext, ApprovalDecision,
@@ -235,6 +235,7 @@ pub struct RuntimeBuilder {
     checkpoint_store: Option<Arc<dyn TurnCheckpointStorePort>>,
     artifact_store: Option<Arc<dyn ArtifactStorePort>>,
     cost_meter: Option<Arc<dyn CostMeterPort>>,
+    context_compactor: Option<Arc<dyn ContextCompactorPort>>,
 }
 
 impl std::fmt::Debug for RuntimeBuilder {
@@ -253,6 +254,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("has_checkpoint_store", &self.checkpoint_store.is_some())
             .field("has_artifact_store", &self.artifact_store.is_some())
             .field("has_cost_meter", &self.cost_meter.is_some())
+            .field("has_context_compactor", &self.context_compactor.is_some())
             .finish()
     }
 }
@@ -339,6 +341,15 @@ impl RuntimeBuilder {
     }
 
     #[must_use]
+    pub fn with_context_compactor(
+        mut self,
+        context_compactor: Arc<dyn ContextCompactorPort>,
+    ) -> Self {
+        self.context_compactor = Some(context_compactor);
+        self
+    }
+
+    #[must_use]
     pub fn add_tool_layer(mut self, layer: Arc<dyn ToolLayer>) -> Self {
         self.tool_layers.push(layer);
         self
@@ -369,6 +380,11 @@ impl RuntimeBuilder {
         let cost_meter: Arc<dyn CostMeterPort> = self
             .cost_meter
             .unwrap_or_else(|| Arc::new(NoOpCostMeterPort) as Arc<dyn CostMeterPort>);
+        let context_compactor: Arc<dyn ContextCompactorPort> =
+            self.context_compactor.unwrap_or_else(|| {
+                Arc::new(crate::prompt::WindowContextCompactor::default())
+                    as Arc<dyn ContextCompactorPort>
+            });
 
         let mut tools: Arc<dyn ToolPort> =
             self.tools.unwrap_or_else(|| Arc::new(NoOpToolPort) as Arc<dyn ToolPort>);
@@ -389,6 +405,7 @@ impl RuntimeBuilder {
             checkpoint_store,
             artifact_store,
             cost_meter,
+            context_compactor,
         };
         Ok(Arc::new(rt))
     }
@@ -434,6 +451,7 @@ pub struct DefaultAgentRuntime {
     pub checkpoint_store: Arc<dyn TurnCheckpointStorePort>,
     pub artifact_store: Arc<dyn ArtifactStorePort>,
     pub cost_meter: Arc<dyn CostMeterPort>,
+    pub context_compactor: Arc<dyn ContextCompactorPort>,
 }
 
 impl std::fmt::Debug for DefaultAgentRuntime {
@@ -459,6 +477,7 @@ impl AgentRuntime for DefaultAgentRuntime {
             self.checkpoint_store.as_ref(),
             self.artifact_store.as_ref(),
             self.cost_meter.as_ref(),
+            self.context_compactor.as_ref(),
         )
         .await
     }
@@ -478,6 +497,7 @@ impl AgentRuntime for DefaultAgentRuntime {
             self.checkpoint_store.clone(),
             self.artifact_store.clone(),
             self.cost_meter.clone(),
+            self.context_compactor.clone(),
         )
         .await
     }
@@ -491,10 +511,14 @@ impl AgentRuntime for DefaultAgentRuntime {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use bob_core::{
         error::{LlmError, StoreError, ToolError},
+        ports::ContextCompactorPort,
         types::*,
     };
 
@@ -557,6 +581,58 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingLlm {
+        requests: Mutex<Vec<LlmRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for RecordingLlm {
+        async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+            let mut requests =
+                self.requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            requests.push(req);
+            Ok(LlmResponse {
+                content: r#"{"type": "final", "content": "recorded"}"#.into(),
+                usage: TokenUsage::default(),
+                finish_reason: FinishReason::Stop,
+                tool_calls: Vec::new(),
+            })
+        }
+
+        async fn complete_stream(&self, _req: LlmRequest) -> Result<LlmStream, LlmError> {
+            Err(LlmError::Provider("not implemented".into()))
+        }
+    }
+
+    struct SessionFixtureStore {
+        state: SessionState,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for SessionFixtureStore {
+        async fn load(&self, _id: &SessionId) -> Result<Option<SessionState>, StoreError> {
+            Ok(Some(self.state.clone()))
+        }
+
+        async fn save(&self, _id: &SessionId, _state: &SessionState) -> Result<(), StoreError> {
+            Ok(())
+        }
+    }
+
+    struct OverrideCompactor {
+        invocations: AtomicUsize,
+        compacted: Vec<Message>,
+    }
+
+    #[async_trait::async_trait]
+    impl ContextCompactorPort for OverrideCompactor {
+        async fn compact(&self, _session: &SessionState) -> Vec<Message> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            self.compacted.clone()
+        }
+    }
+
     #[tokio::test]
     async fn default_runtime_run() {
         let rt: Arc<dyn AgentRuntime> = Arc::new(DefaultAgentRuntime {
@@ -572,6 +648,7 @@ mod tests {
             checkpoint_store: Arc::new(NoOpCheckpointStorePort),
             artifact_store: Arc::new(NoOpArtifactStorePort),
             cost_meter: Arc::new(NoOpCostMeterPort),
+            context_compactor: Arc::new(crate::prompt::WindowContextCompactor::default()),
         });
 
         let req = AgentRequest {
@@ -608,6 +685,7 @@ mod tests {
             checkpoint_store: Arc::new(NoOpCheckpointStorePort),
             artifact_store: Arc::new(NoOpArtifactStorePort),
             cost_meter: Arc::new(NoOpCostMeterPort),
+            context_compactor: Arc::new(crate::prompt::WindowContextCompactor::default()),
         };
 
         let health = rt.health().await;
@@ -621,5 +699,49 @@ mod tests {
             matches!(result, Err(AgentError::Config(msg)) if msg.contains("missing LLM")),
             "missing llm should return config error"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_builder_uses_custom_context_compactor() {
+        let llm = Arc::new(RecordingLlm::default());
+        let compactor = Arc::new(OverrideCompactor {
+            invocations: AtomicUsize::new(0),
+            compacted: vec![Message::text(Role::Assistant, "compacted-history")],
+        });
+
+        let runtime = RuntimeBuilder::new()
+            .with_llm(llm.clone())
+            .with_tools(Arc::new(StubTools))
+            .with_store(Arc::new(SessionFixtureStore {
+                state: SessionState {
+                    messages: vec![
+                        Message::text(Role::User, "original-user"),
+                        Message::text(Role::Assistant, "original-assistant"),
+                    ],
+                    total_usage: TokenUsage::default(),
+                },
+            }))
+            .with_events(Arc::new(StubSink { count: Mutex::new(0) }))
+            .with_default_model("test-model")
+            .with_context_compactor(compactor.clone())
+            .build()
+            .expect("runtime should build");
+
+        let req = AgentRequest {
+            input: "hello".into(),
+            session_id: "test".into(),
+            model: None,
+            context: RequestContext::default(),
+            cancel_token: None,
+        };
+
+        let result = runtime.run(req).await;
+        assert!(matches!(result, Ok(AgentRunResult::Finished(_))), "unexpected result: {result:?}");
+        assert_eq!(compactor.invocations.load(Ordering::SeqCst), 1);
+
+        let requests = llm.requests.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let request = requests.last().expect("llm should receive one request");
+        assert!(request.messages.iter().any(|message| message.content == "compacted-history"));
+        assert!(!request.messages.iter().any(|message| message.content == "original-assistant"));
     }
 }

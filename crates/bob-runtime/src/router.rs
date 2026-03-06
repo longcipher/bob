@@ -46,6 +46,8 @@ pub enum SlashCommand {
     Anchors,
     /// `/handoff [name]` — create a handoff anchor and reset context window.
     Handoff { name: Option<String> },
+    /// `/usage` — show cumulative token usage for the current session.
+    Usage,
     /// `/quit` or `/exit` — signal the channel to close.
     Quit,
     /// Fallback: treat unrecognized `/cmd` as a shell command.
@@ -86,6 +88,7 @@ pub fn route(input: &str) -> RouteResult {
         "handoff" => RouteResult::SlashCommand(SlashCommand::Handoff {
             name: if args.is_empty() { None } else { Some(args.to_string()) },
         }),
+        "usage" => RouteResult::SlashCommand(SlashCommand::Usage),
         "quit" | "exit" => RouteResult::SlashCommand(SlashCommand::Quit),
         _ => {
             // Unrecognized command → treat as shell command
@@ -106,6 +109,7 @@ Available commands:
   /tape.info            Show tape statistics
   /anchors              List all tape anchors
   /handoff [NAME]       Reset context window (create handoff point)
+  /usage                Show cumulative session token usage
   /quit                 Exit the session
 
 Natural language input (without /) goes to the AI model."
@@ -173,6 +177,11 @@ mod tests {
             route("/handoff"),
             RouteResult::SlashCommand(SlashCommand::Handoff { name: None })
         );
+    }
+
+    #[test]
+    fn usage_command() {
+        assert_eq!(route("/usage"), RouteResult::SlashCommand(SlashCommand::Usage));
     }
 
     #[test]

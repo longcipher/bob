@@ -54,7 +54,7 @@ mod tests {
     use super::*;
 
     fn make_tool_call(name: &str) -> ToolCall {
-        ToolCall { name: name.to_string(), arguments: serde_json::json!({}) }
+        ToolCall::new(name.to_string(), serde_json::json!({}))
     }
 
     fn test_context() -> ApprovalContext {

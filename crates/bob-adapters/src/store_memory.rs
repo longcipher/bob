@@ -121,7 +121,7 @@ mod tests {
         let store = InMemorySessionStore::new();
         let id = "sess-1".to_string();
         let state = SessionState {
-            messages: vec![Message { role: bob_core::types::Role::User, content: "hello".into() }],
+            messages: vec![Message::text(bob_core::types::Role::User, "hello")],
             ..SessionState::default()
         };
 
@@ -137,15 +137,15 @@ mod tests {
         let id = "sess-2".to_string();
 
         let state1 = SessionState {
-            messages: vec![Message { role: bob_core::types::Role::User, content: "first".into() }],
+            messages: vec![Message::text(bob_core::types::Role::User, "first")],
             ..SessionState::default()
         };
         store.save(&id, &state1).await.ok();
 
         let state2 = SessionState {
             messages: vec![
-                Message { role: bob_core::types::Role::User, content: "first".into() },
-                Message { role: bob_core::types::Role::Assistant, content: "second".into() },
+                Message::text(bob_core::types::Role::User, "first"),
+                Message::text(bob_core::types::Role::Assistant, "second"),
             ],
             ..SessionState::default()
         };

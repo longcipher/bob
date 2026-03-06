@@ -176,7 +176,7 @@ mod tests {
             ("git".into(), p2 as Arc<dyn ToolPort>),
         ]);
 
-        let call = ToolCall { name: "mcp/git/log".into(), arguments: serde_json::json!({}) };
+        let call = ToolCall::new("mcp/git/log", serde_json::json!({}));
         let result = composite.call_tool(call).await;
         assert!(result.is_ok());
         assert_eq!(result.ok().map(|r| r.name), Some("mcp/git/log".into()));
@@ -185,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_tool_returns_error() {
         let composite = CompositeToolPort::new(vec![]);
-        let call = ToolCall { name: "mcp/unknown/tool".into(), arguments: serde_json::json!({}) };
+        let call = ToolCall::new("mcp/unknown/tool", serde_json::json!({}));
         let result = composite.call_tool(call).await;
         assert!(result.is_err());
     }

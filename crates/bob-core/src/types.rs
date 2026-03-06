@@ -127,8 +127,23 @@ pub enum ToolSource {
 /// A request to call a tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
     pub name: String,
     pub arguments: serde_json::Value,
+}
+
+impl ToolCall {
+    #[must_use]
+    pub fn new(name: impl Into<String>, arguments: serde_json::Value) -> Self {
+        Self { call_id: None, name: name.into(), arguments }
+    }
+
+    #[must_use]
+    pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
+        self.call_id = Some(call_id.into());
+        self
+    }
 }
 
 /// Result of a tool invocation.
@@ -198,6 +213,51 @@ impl Default for LlmCapabilities {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+}
+
+impl Message {
+    #[must_use]
+    pub fn text(role: Role, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+        }
+    }
+
+    #[must_use]
+    pub fn assistant_tool_calls(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_calls,
+            tool_call_id: None,
+            tool_name: None,
+        }
+    }
+
+    #[must_use]
+    pub fn tool_result(
+        tool_name: impl Into<String>,
+        call_id: Option<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: call_id,
+            tool_name: Some(tool_name.into()),
+        }
+    }
 }
 
 /// Conversation role.
@@ -227,13 +287,13 @@ pub struct SessionState {
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     TurnStarted { session_id: SessionId },
-    SkillsSelected { skill_names: Vec<String> },
-    LlmCallStarted { model: String },
-    LlmCallCompleted { usage: TokenUsage },
-    ToolCallStarted { name: String },
-    ToolCallCompleted { name: String, is_error: bool },
-    TurnCompleted { finish_reason: FinishReason },
-    Error { error: String },
+    SkillsSelected { session_id: SessionId, skill_names: Vec<String> },
+    LlmCallStarted { session_id: SessionId, step: u32, model: String },
+    LlmCallCompleted { session_id: SessionId, step: u32, model: String, usage: TokenUsage },
+    ToolCallStarted { session_id: SessionId, step: u32, name: String },
+    ToolCallCompleted { session_id: SessionId, step: u32, name: String, is_error: bool },
+    TurnCompleted { session_id: SessionId, finish_reason: FinishReason, usage: TokenUsage },
+    Error { session_id: SessionId, step: Option<u32>, error: String },
 }
 
 /// Streaming event for `run_stream`.
@@ -357,6 +417,12 @@ pub struct RuntimeHealth {
     pub mcp_pool_ready: bool,
 }
 
+impl Default for RuntimeHealth {
+    fn default() -> Self {
+        Self { status: HealthStatus::Healthy, llm_ready: true, mcp_pool_ready: true }
+    }
+}
+
 /// Overall health state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthStatus {
@@ -373,4 +439,72 @@ pub struct TurnContext {
     pub session_id: SessionId,
     pub trace_id: String,
     pub policy: TurnPolicy,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn session_state_deserializes_legacy_messages_without_tool_metadata() {
+        let raw = json!({
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "tool", "content": "{\"ok\":true}"}
+            ],
+            "total_usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 5
+            }
+        });
+
+        let state: SessionState =
+            serde_json::from_value(raw).expect("legacy session payload should deserialize");
+
+        assert_eq!(state.messages.len(), 3);
+        assert!(state.messages[0].tool_calls.is_empty());
+        assert_eq!(state.messages[1].tool_call_id, None);
+        assert_eq!(state.messages[2].tool_name, None);
+        assert_eq!(state.total_usage.total(), 8);
+    }
+
+    #[test]
+    fn session_state_roundtrips_structured_tool_metadata() {
+        let state = SessionState {
+            messages: vec![
+                Message {
+                    role: Role::Assistant,
+                    content: String::new(),
+                    tool_calls: vec![ToolCall {
+                        call_id: Some("call-1".into()),
+                        name: "search".into(),
+                        arguments: json!({"q": "rust"}),
+                    }],
+                    tool_call_id: None,
+                    tool_name: None,
+                },
+                Message {
+                    role: Role::Tool,
+                    content: "{\"hits\":2}".into(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: Some("call-1".into()),
+                    tool_name: Some("search".into()),
+                },
+            ],
+            total_usage: TokenUsage { prompt_tokens: 11, completion_tokens: 7 },
+        };
+
+        let encoded = serde_json::to_value(&state).expect("session state should serialize");
+        let decoded: SessionState =
+            serde_json::from_value(encoded).expect("structured session state should deserialize");
+
+        assert_eq!(decoded.messages.len(), 2);
+        assert_eq!(decoded.messages[0].tool_calls.len(), 1);
+        assert_eq!(decoded.messages[0].tool_calls[0].call_id.as_deref(), Some("call-1"));
+        assert_eq!(decoded.messages[1].tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(decoded.messages[1].tool_name.as_deref(), Some("search"));
+    }
 }

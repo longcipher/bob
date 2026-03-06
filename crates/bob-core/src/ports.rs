@@ -57,8 +57,8 @@ use crate::{
     tape::{TapeEntry, TapeEntryKind, TapeSearchResult},
     types::{
         AgentEvent, ApprovalContext, ApprovalDecision, ArtifactRecord, LlmCapabilities, LlmRequest,
-        LlmResponse, LlmStream, SessionId, SessionState, TokenUsage, ToolCall, ToolDescriptor,
-        ToolResult, TurnCheckpoint,
+        LlmResponse, LlmStream, Message, SessionId, SessionState, TokenUsage, ToolCall,
+        ToolDescriptor, ToolResult, TurnCheckpoint,
     },
 };
 
@@ -78,6 +78,13 @@ pub trait LlmPort: Send + Sync {
 
     /// Run a streaming inference call.
     async fn complete_stream(&self, req: LlmRequest) -> Result<LlmStream, LlmError>;
+}
+
+/// Port for compacting persisted session transcript into prompt-ready history.
+#[async_trait::async_trait]
+pub trait ContextCompactorPort: Send + Sync {
+    /// Return the transcript entries that should be forwarded to the prompt builder.
+    async fn compact(&self, session: &SessionState) -> Vec<Message>;
 }
 
 // ── Tool Port ────────────────────────────────────────────────────────
@@ -377,12 +384,8 @@ mod tests {
             assert_eq!(listed[0].id, "test/echo");
         }
 
-        let result = tools
-            .call_tool(ToolCall {
-                name: "test/echo".into(),
-                arguments: serde_json::json!({"msg": "hi"}),
-            })
-            .await;
+        let result =
+            tools.call_tool(ToolCall::new("test/echo", serde_json::json!({"msg": "hi"}))).await;
         assert!(result.is_ok(), "call_tool should succeed");
         if let Ok(result) = result {
             assert!(!result.is_error);
@@ -398,10 +401,7 @@ mod tests {
         assert!(matches!(loaded_before, Ok(None)));
 
         let state = SessionState {
-            messages: vec![crate::types::Message {
-                role: crate::types::Role::User,
-                content: "hello".into(),
-            }],
+            messages: vec![crate::types::Message::text(crate::types::Role::User, "hello")],
             ..Default::default()
         };
 
@@ -420,7 +420,7 @@ mod tests {
     fn event_sink_collect() {
         let sink = MockEventSink::new();
         sink.emit(AgentEvent::TurnStarted { session_id: "s1".into() });
-        sink.emit(AgentEvent::Error { error: "boom".into() });
+        sink.emit(AgentEvent::Error { session_id: "s1".into(), step: None, error: "boom".into() });
 
         let events = sink.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(events.len(), 2);

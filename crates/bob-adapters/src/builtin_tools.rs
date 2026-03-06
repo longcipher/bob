@@ -345,12 +345,8 @@ mod tests {
         std::fs::write(&file_path, "hello").unwrap_or_default();
 
         let port = BuiltinToolPort::new(dir.path().to_path_buf());
-        let result = port
-            .call_tool(ToolCall {
-                name: "local/file_read".to_string(),
-                arguments: json!({ "path": "test.txt" }),
-            })
-            .await;
+        let result =
+            port.call_tool(ToolCall::new("local/file_read", json!({ "path": "test.txt" }))).await;
 
         assert!(result.is_ok());
         if let Ok(r) = result {
@@ -373,12 +369,8 @@ mod tests {
         assert!(linked.is_ok(), "should create symlink test fixture");
 
         let port = BuiltinToolPort::new(workspace.path().to_path_buf());
-        let result = port
-            .call_tool(ToolCall {
-                name: "local/file_read".to_string(),
-                arguments: json!({ "path": "link.txt" }),
-            })
-            .await;
+        let result =
+            port.call_tool(ToolCall::new("local/file_read", json!({ "path": "link.txt" }))).await;
 
         assert!(result.is_ok());
         if let Ok(tool_result) = result {
@@ -407,13 +399,13 @@ mod tests {
 
         let port = BuiltinToolPort::new(workspace.path().to_path_buf());
         let result = port
-            .call_tool(ToolCall {
-                name: "local/file_write".to_string(),
-                arguments: json!({
+            .call_tool(ToolCall::new(
+                "local/file_write",
+                json!({
                     "path": "escape/pwned.txt",
                     "content": "blocked"
                 }),
-            })
+            ))
             .await;
 
         assert!(result.is_ok());

@@ -15,7 +15,7 @@ Adapter implementations for the [Bob Agent Framework](https://github.com/longcip
 - **Storage Adapters**: Persist session state
 - **Runtime Extension Adapters**: Checkpoints, artifacts, and cost metering
 - **Runtime Guardrail Adapters**: Tool policy and approval adapters
-- **Observability Adapters**: Log and monitor agent events
+- **Observability Adapters**: Log and monitor agent events, including fanout hook composition
 
 ## Features
 
@@ -33,14 +33,14 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bob-adapters = "0.1"
+bob-adapters = "0.2.1"
 ```
 
 To disable default features and select specific adapters:
 
 ```toml
 [dependencies.bob-adapters]
-version = "0.1"
+version = "0.2.1"
 default-features = false
 features = ["llm-genai", "mcp-rmcp"]
 ```

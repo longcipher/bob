@@ -45,8 +45,8 @@ use bob_core::{
     error::AgentError,
     normalize_tool_list,
     ports::{
-        ApprovalPort, ArtifactStorePort, CostMeterPort, EventSink, LlmPort, SessionStore,
-        ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
+        ApprovalPort, ArtifactStorePort, ContextCompactorPort, CostMeterPort, EventSink, LlmPort,
+        SessionStore, ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
     },
     types::{
         AgentAction, AgentEvent, AgentEventStream, AgentRequest, AgentResponse, AgentRunResult,
@@ -311,6 +311,7 @@ pub async fn run_turn(
     let checkpoint_store = crate::NoOpCheckpointStorePort;
     let artifact_store = crate::NoOpArtifactStorePort;
     let cost_meter = crate::NoOpCostMeterPort;
+    let compactor = crate::prompt::WindowContextCompactor::default();
     run_turn_with_extensions(
         llm,
         tools,
@@ -325,6 +326,7 @@ pub async fn run_turn(
         &checkpoint_store,
         &artifact_store,
         &cost_meter,
+        &compactor,
     )
     .await
 }
@@ -355,6 +357,7 @@ pub(crate) async fn run_turn_with_controls(
     let checkpoint_store = crate::NoOpCheckpointStorePort;
     let artifact_store = crate::NoOpArtifactStorePort;
     let cost_meter = crate::NoOpCostMeterPort;
+    let compactor = crate::prompt::WindowContextCompactor::default();
     run_turn_with_extensions(
         llm,
         tools,
@@ -369,6 +372,7 @@ pub(crate) async fn run_turn_with_controls(
         &checkpoint_store,
         &artifact_store,
         &cost_meter,
+        &compactor,
     )
     .await
 }
@@ -392,6 +396,7 @@ pub(crate) async fn run_turn_with_extensions(
     checkpoint_store: &dyn TurnCheckpointStorePort,
     artifact_store: &dyn ArtifactStorePort,
     cost_meter: &dyn CostMeterPort,
+    context_compactor: &dyn ContextCompactorPort,
 ) -> Result<AgentRunResult, AgentError> {
     let model = req.model.as_deref().unwrap_or(default_model);
     let cancel_token = req.cancel_token.clone();
@@ -408,10 +413,13 @@ pub(crate) async fn run_turn_with_extensions(
 
     events.emit(AgentEvent::TurnStarted { session_id: req.session_id.clone() });
     if !selected_skills.is_empty() {
-        events.emit(AgentEvent::SkillsSelected { skill_names: selected_skills.clone() });
+        events.emit(AgentEvent::SkillsSelected {
+            session_id: req.session_id.clone(),
+            skill_names: selected_skills.clone(),
+        });
     }
 
-    session.messages.push(Message { role: Role::User, content: req.input.clone() });
+    session.messages.push(Message::text(Role::User, req.input.clone()));
 
     let mut tool_transcript: Vec<ToolResult> = Vec::new();
     let mut total_usage = TokenUsage::default();
@@ -421,6 +429,8 @@ pub(crate) async fn run_turn_with_extensions(
     let mut same_tool_call_streak: u32 = 0;
 
     loop {
+        let current_step = guard.steps.saturating_add(1);
+
         if let Some(ref token) = cancel_token &&
             token.is_cancelled()
         {
@@ -475,13 +485,19 @@ pub(crate) async fn run_turn_with_extensions(
             &active_tools,
             &augmented_instructions,
             prompt_options_for_mode(dispatch_mode, llm),
-        );
+            context_compactor,
+        )
+        .await;
 
-        events.emit(AgentEvent::LlmCallStarted { model: model.to_string() });
+        events.emit(AgentEvent::LlmCallStarted {
+            session_id: req.session_id.clone(),
+            step: current_step,
+            model: model.to_string(),
+        });
 
         let llm_response = if let Some(ref token) = cancel_token {
             tokio::select! {
-                result = llm.complete(llm_request) => result?,
+                result = llm.complete(llm_request.clone()) => result?,
                 () = token.cancelled() => {
                     return finish_turn(
                         store, events, &req.session_id, &session,
@@ -504,14 +520,30 @@ pub(crate) async fn run_turn_with_extensions(
             .saturating_add(llm_response.usage.completion_tokens);
         cost_meter.record_llm_usage(&req.session_id, model, &llm_response.usage).await?;
 
-        events.emit(AgentEvent::LlmCallCompleted { usage: llm_response.usage.clone() });
+        events.emit(AgentEvent::LlmCallCompleted {
+            session_id: req.session_id.clone(),
+            step: current_step,
+            model: model.to_string(),
+            usage: llm_response.usage.clone(),
+        });
+        let native_tool_call = if llm.capabilities().native_tool_calling {
+            llm_response.tool_calls.first().cloned()
+        } else {
+            None
+        };
 
         // Scan LLM response for tool name hints and activate them.
         tool_view.activate_hints(&llm_response.content);
 
-        session
-            .messages
-            .push(Message { role: Role::Assistant, content: llm_response.content.clone() });
+        let assistant_message = if llm_response.tool_calls.is_empty() {
+            Message::text(Role::Assistant, llm_response.content.clone())
+        } else {
+            Message::assistant_tool_calls(
+                llm_response.content.clone(),
+                llm_response.tool_calls.clone(),
+            )
+        };
+        session.messages.push(assistant_message);
 
         let _ = checkpoint_store
             .save_checkpoint(&TurnCheckpoint {
@@ -557,6 +589,10 @@ pub(crate) async fn run_turn_with_extensions(
                         .await;
                     }
                     AgentAction::ToolCall { name, arguments } => {
+                        let tool_call_id = native_tool_call
+                            .as_ref()
+                            .filter(|call| call.name == name && call.arguments == arguments)
+                            .and_then(|call| call.call_id.clone());
                         // Activate the tool in progressive view for subsequent requests.
                         tool_view.activate(&name);
 
@@ -573,7 +609,11 @@ pub(crate) async fn run_turn_with_extensions(
                         }
 
                         if same_tool_call_streak > MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS {
-                            events.emit(AgentEvent::ToolCallStarted { name: name.clone() });
+                            events.emit(AgentEvent::ToolCallStarted {
+                                session_id: req.session_id.clone(),
+                                step: current_step,
+                                name: name.clone(),
+                            });
                             let dup_result = ToolResult {
                                 name: name.clone(),
                                 output: serde_json::json!({
@@ -588,10 +628,14 @@ pub(crate) async fn run_turn_with_extensions(
                                 cost_meter.record_tool_result(&req.session_id, &dup_result).await;
                             let output_str =
                                 serde_json::to_string(&dup_result.output).unwrap_or_default();
-                            session
-                                .messages
-                                .push(Message { role: Role::Tool, content: output_str });
+                            session.messages.push(Message::tool_result(
+                                name.clone(),
+                                tool_call_id.clone(),
+                                output_str,
+                            ));
                             events.emit(AgentEvent::ToolCallCompleted {
+                                session_id: req.session_id.clone(),
+                                step: current_step,
                                 name: name.clone(),
                                 is_error: true,
                             });
@@ -607,7 +651,11 @@ pub(crate) async fn run_turn_with_extensions(
                             continue;
                         }
 
-                        events.emit(AgentEvent::ToolCallStarted { name: name.clone() });
+                        events.emit(AgentEvent::ToolCallStarted {
+                            session_id: req.session_id.clone(),
+                            step: current_step,
+                            name: name.clone(),
+                        });
                         let approval_context = ApprovalContext {
                             session_id: req.session_id.clone(),
                             turn_step: guard.steps.max(1),
@@ -617,7 +665,7 @@ pub(crate) async fn run_turn_with_extensions(
                         let tool_result = execute_tool_call(
                             tools,
                             &mut guard,
-                            ToolCall { name: name.clone(), arguments },
+                            ToolCall::new(name.clone(), arguments),
                             &tool_call_policy,
                             tool_policy_port,
                             approval_port,
@@ -630,11 +678,20 @@ pub(crate) async fn run_turn_with_extensions(
                         let _ = cost_meter.record_tool_result(&req.session_id, &tool_result).await;
 
                         let is_error = tool_result.is_error;
-                        events.emit(AgentEvent::ToolCallCompleted { name: name.clone(), is_error });
+                        events.emit(AgentEvent::ToolCallCompleted {
+                            session_id: req.session_id.clone(),
+                            step: current_step,
+                            name: name.clone(),
+                            is_error,
+                        });
 
                         let output_str =
                             serde_json::to_string(&tool_result.output).unwrap_or_default();
-                        session.messages.push(Message { role: Role::Tool, content: output_str });
+                        session.messages.push(Message::tool_result(
+                            name.clone(),
+                            tool_call_id,
+                            output_str,
+                        ));
 
                         let _ = artifact_store
                             .put(ArtifactRecord {
@@ -659,13 +716,12 @@ pub(crate) async fn run_turn_with_extensions(
                         "LLM produced invalid JSON after re-prompt".into(),
                     ));
                 }
-                session.messages.push(Message {
-                    role: Role::User,
-                    content: "Your response was not valid JSON. \
-                              Please respond with exactly one JSON object \
-                              matching the required schema."
-                        .into(),
-                });
+                session.messages.push(Message::text(
+                    Role::User,
+                    "Your response was not valid JSON. \
+                     Please respond with exactly one JSON object \
+                     matching the required schema.",
+                ));
             }
         }
     }
@@ -688,7 +744,11 @@ async fn finish_turn(
     result: FinishResult<'_>,
 ) -> Result<AgentRunResult, AgentError> {
     store.save(session_id, session).await?;
-    events.emit(AgentEvent::TurnCompleted { finish_reason: result.finish_reason });
+    events.emit(AgentEvent::TurnCompleted {
+        session_id: session_id.clone(),
+        finish_reason: result.finish_reason,
+        usage: result.usage.clone(),
+    });
     Ok(AgentRunResult::Finished(AgentResponse {
         content: result.content.to_string(),
         tool_transcript: result.tool_transcript,
@@ -713,6 +773,8 @@ pub async fn run_turn_stream(
         Arc::new(crate::NoOpCheckpointStorePort);
     let artifact_store: Arc<dyn ArtifactStorePort> = Arc::new(crate::NoOpArtifactStorePort);
     let cost_meter: Arc<dyn CostMeterPort> = Arc::new(crate::NoOpCostMeterPort);
+    let context_compactor: Arc<dyn ContextCompactorPort> =
+        Arc::new(crate::prompt::WindowContextCompactor::default());
     run_turn_stream_with_controls(
         llm,
         tools,
@@ -727,6 +789,7 @@ pub async fn run_turn_stream(
         checkpoint_store,
         artifact_store,
         cost_meter,
+        context_compactor,
     )
     .await
 }
@@ -750,6 +813,7 @@ pub(crate) async fn run_turn_stream_with_controls(
     checkpoint_store: Arc<dyn TurnCheckpointStorePort>,
     artifact_store: Arc<dyn ArtifactStorePort>,
     cost_meter: Arc<dyn CostMeterPort>,
+    context_compactor: Arc<dyn ContextCompactorPort>,
 ) -> Result<AgentEventStream, AgentError> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentStreamEvent>();
     let config = StreamRunConfig {
@@ -761,6 +825,7 @@ pub(crate) async fn run_turn_stream_with_controls(
         checkpoint_store,
         artifact_store,
         cost_meter,
+        context_compactor,
     };
 
     tokio::spawn(async move {
@@ -782,6 +847,7 @@ struct StreamRunConfig {
     checkpoint_store: Arc<dyn TurnCheckpointStorePort>,
     artifact_store: Arc<dyn ArtifactStorePort>,
     cost_meter: Arc<dyn CostMeterPort>,
+    context_compactor: Arc<dyn ContextCompactorPort>,
 }
 
 async fn run_turn_stream_inner(
@@ -810,16 +876,29 @@ async fn run_turn_stream_inner(
 
     events.emit(AgentEvent::TurnStarted { session_id: req.session_id.clone() });
     if !selected_skills.is_empty() {
-        events.emit(AgentEvent::SkillsSelected { skill_names: selected_skills.clone() });
+        events.emit(AgentEvent::SkillsSelected {
+            session_id: req.session_id.clone(),
+            skill_names: selected_skills.clone(),
+        });
     }
-    session.messages.push(Message { role: Role::User, content: req.input.clone() });
+    session.messages.push(Message::text(Role::User, req.input.clone()));
 
     loop {
+        let current_step = guard.steps.saturating_add(1);
+
         if let Some(ref token) = cancel_token &&
             token.is_cancelled()
         {
-            events.emit(AgentEvent::Error { error: "turn cancelled".to_string() });
-            events.emit(AgentEvent::TurnCompleted { finish_reason: FinishReason::Cancelled });
+            events.emit(AgentEvent::Error {
+                session_id: req.session_id.clone(),
+                step: Some(current_step),
+                error: "turn cancelled".to_string(),
+            });
+            events.emit(AgentEvent::TurnCompleted {
+                session_id: req.session_id.clone(),
+                finish_reason: FinishReason::Cancelled,
+                usage: total_usage.clone(),
+            });
             store.save(&req.session_id, &session).await?;
             let _ = tx.send(AgentStreamEvent::Error { error: "turn cancelled".to_string() });
             let _ = tx.send(AgentStreamEvent::Finished { usage: total_usage.clone() });
@@ -831,8 +910,16 @@ async fn run_turn_stream_inner(
         if !guard.can_continue() {
             let reason = guard.reason();
             let msg = format!("Turn stopped: {reason:?}");
-            events.emit(AgentEvent::Error { error: msg.clone() });
-            events.emit(AgentEvent::TurnCompleted { finish_reason: FinishReason::GuardExceeded });
+            events.emit(AgentEvent::Error {
+                session_id: req.session_id.clone(),
+                step: Some(current_step),
+                error: msg.clone(),
+            });
+            events.emit(AgentEvent::TurnCompleted {
+                session_id: req.session_id.clone(),
+                finish_reason: FinishReason::GuardExceeded,
+                usage: total_usage.clone(),
+            });
             store.save(&req.session_id, &session).await?;
             let _ = tx.send(AgentStreamEvent::Error { error: msg });
             let _ = tx.send(AgentStreamEvent::Finished { usage: total_usage.clone() });
@@ -845,43 +932,61 @@ async fn run_turn_stream_inner(
             &tool_descriptors,
             &system_instructions,
             prompt_options_for_mode(config.dispatch_mode, llm.as_ref()),
+            config.context_compactor.as_ref(),
         );
-        events.emit(AgentEvent::LlmCallStarted { model: model.to_string() });
+        events.emit(AgentEvent::LlmCallStarted {
+            session_id: req.session_id.clone(),
+            step: current_step,
+            model: model.to_string(),
+        });
 
         let mut assistant_content = String::new();
         let mut llm_usage = TokenUsage::default();
         let mut llm_tool_calls: Vec<ToolCall> = Vec::new();
+        let mut llm_finish_reason = FinishReason::Stop;
         let mut fallback_to_complete = false;
 
-        match llm.complete_stream(llm_request.clone()).await {
-            Ok(mut stream) => {
-                while let Some(item) = stream.next().await {
-                    match item {
-                        Ok(bob_core::types::LlmStreamChunk::TextDelta(delta)) => {
-                            assistant_content.push_str(&delta);
-                            let _ = tx.send(AgentStreamEvent::TextDelta { content: delta });
-                        }
-                        Ok(bob_core::types::LlmStreamChunk::Done { usage }) => {
-                            llm_usage = usage;
-                        }
-                        Err(err) => {
-                            events.emit(AgentEvent::Error { error: err.to_string() });
-                            return Err(AgentError::Llm(err));
+        let llm_request = llm_request.await;
+        if llm.capabilities().native_tool_calling {
+            fallback_to_complete = true;
+        } else {
+            match llm.complete_stream(llm_request.clone()).await {
+                Ok(mut stream) => {
+                    while let Some(item) = stream.next().await {
+                        match item {
+                            Ok(bob_core::types::LlmStreamChunk::TextDelta(delta)) => {
+                                assistant_content.push_str(&delta);
+                                let _ = tx.send(AgentStreamEvent::TextDelta { content: delta });
+                            }
+                            Ok(bob_core::types::LlmStreamChunk::Done { usage }) => {
+                                llm_usage = usage;
+                            }
+                            Err(err) => {
+                                events.emit(AgentEvent::Error {
+                                    session_id: req.session_id.clone(),
+                                    step: Some(current_step),
+                                    error: err.to_string(),
+                                });
+                                return Err(AgentError::Llm(err));
+                            }
                         }
                     }
                 }
-            }
-            Err(err) => {
-                fallback_to_complete = true;
-                let _ = err;
+                Err(err) => {
+                    fallback_to_complete = true;
+                    let _ = err;
+                }
             }
         }
 
-        // Provider may not support streaming — fall back to non-streaming complete.
+        // Native tool-calling currently requires the non-streaming response path because the
+        // internal stream interface does not expose structured tool-call chunks.
+        // Providers that simply lack streaming support also fall back here.
         if fallback_to_complete {
             let llm_response = llm.complete(llm_request).await?;
             assistant_content = llm_response.content.clone();
             llm_usage = llm_response.usage;
+            llm_finish_reason = llm_response.finish_reason;
             llm_tool_calls = llm_response.tool_calls;
             let _ = tx.send(AgentStreamEvent::TextDelta { content: llm_response.content });
         }
@@ -894,10 +999,23 @@ async fn run_turn_stream_inner(
         session.total_usage.completion_tokens =
             session.total_usage.completion_tokens.saturating_add(llm_usage.completion_tokens);
         config.cost_meter.record_llm_usage(&req.session_id, model, &llm_usage).await?;
-        events.emit(AgentEvent::LlmCallCompleted { usage: llm_usage.clone() });
-        session
-            .messages
-            .push(Message { role: Role::Assistant, content: assistant_content.clone() });
+        events.emit(AgentEvent::LlmCallCompleted {
+            session_id: req.session_id.clone(),
+            step: current_step,
+            model: model.to_string(),
+            usage: llm_usage.clone(),
+        });
+        let native_tool_call = if llm.capabilities().native_tool_calling {
+            llm_tool_calls.first().cloned()
+        } else {
+            None
+        };
+        let assistant_message = if llm_tool_calls.is_empty() {
+            Message::text(Role::Assistant, assistant_content.clone())
+        } else {
+            Message::assistant_tool_calls(assistant_content.clone(), llm_tool_calls.clone())
+        };
+        session.messages.push(assistant_message);
 
         let _ = config
             .checkpoint_store
@@ -912,7 +1030,7 @@ async fn run_turn_stream_inner(
         let response_for_dispatch = bob_core::types::LlmResponse {
             content: assistant_content.clone(),
             usage: llm_usage.clone(),
-            finish_reason: FinishReason::Stop,
+            finish_reason: llm_finish_reason,
             tool_calls: llm_tool_calls,
         };
 
@@ -923,11 +1041,19 @@ async fn run_turn_stream_inner(
             match action {
                 AgentAction::Final { .. } | AgentAction::AskUser { .. } => {
                     store.save(&req.session_id, &session).await?;
-                    events.emit(AgentEvent::TurnCompleted { finish_reason: FinishReason::Stop });
+                    events.emit(AgentEvent::TurnCompleted {
+                        session_id: req.session_id.clone(),
+                        finish_reason: FinishReason::Stop,
+                        usage: total_usage.clone(),
+                    });
                     let _ = tx.send(AgentStreamEvent::Finished { usage: total_usage.clone() });
                     return Ok(());
                 }
                 AgentAction::ToolCall { name, arguments } => {
+                    let tool_call_id = native_tool_call
+                        .as_ref()
+                        .filter(|call| call.name == name && call.arguments == arguments)
+                        .and_then(|call| call.call_id.clone());
                     let call_signature = format!(
                         "{}:{}",
                         name,
@@ -942,7 +1068,11 @@ async fn run_turn_stream_inner(
                     if same_tool_call_streak > MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS {
                         next_call_id += 1;
                         let call_id = format!("call-{next_call_id}");
-                        events.emit(AgentEvent::ToolCallStarted { name: name.clone() });
+                        events.emit(AgentEvent::ToolCallStarted {
+                            session_id: req.session_id.clone(),
+                            step: current_step,
+                            name: name.clone(),
+                        });
                         let _ = tx.send(AgentStreamEvent::ToolCallStarted {
                             name: name.clone(),
                             call_id: call_id.clone(),
@@ -962,12 +1092,18 @@ async fn run_turn_stream_inner(
                             .record_tool_result(&req.session_id, &duplicate_result)
                             .await;
                         events.emit(AgentEvent::ToolCallCompleted {
+                            session_id: req.session_id.clone(),
+                            step: current_step,
                             name: name.clone(),
                             is_error: true,
                         });
                         let output_str =
                             serde_json::to_string(&duplicate_result.output).unwrap_or_default();
-                        session.messages.push(Message { role: Role::Tool, content: output_str });
+                        session.messages.push(Message::tool_result(
+                            name.clone(),
+                            tool_call_id.clone(),
+                            output_str,
+                        ));
                         let _ = config
                             .artifact_store
                             .put(ArtifactRecord {
@@ -984,7 +1120,11 @@ async fn run_turn_stream_inner(
                         continue;
                     }
 
-                    events.emit(AgentEvent::ToolCallStarted { name: name.clone() });
+                    events.emit(AgentEvent::ToolCallStarted {
+                        session_id: req.session_id.clone(),
+                        step: current_step,
+                        name: name.clone(),
+                    });
                     next_call_id += 1;
                     let call_id = format!("call-{next_call_id}");
                     let _ = tx.send(AgentStreamEvent::ToolCallStarted {
@@ -1000,7 +1140,7 @@ async fn run_turn_stream_inner(
                     let tool_result = execute_tool_call(
                         tools.as_ref(),
                         &mut guard,
-                        ToolCall { name: name.clone(), arguments },
+                        ToolCall::new(name.clone(), arguments),
                         &tool_call_policy,
                         config.tool_policy.as_ref(),
                         config.approval.as_ref(),
@@ -1013,14 +1153,23 @@ async fn run_turn_stream_inner(
                     let _ =
                         config.cost_meter.record_tool_result(&req.session_id, &tool_result).await;
                     let is_error = tool_result.is_error;
-                    events.emit(AgentEvent::ToolCallCompleted { name: name.clone(), is_error });
+                    events.emit(AgentEvent::ToolCallCompleted {
+                        session_id: req.session_id.clone(),
+                        step: current_step,
+                        name: name.clone(),
+                        is_error,
+                    });
                     let _ = tx.send(AgentStreamEvent::ToolCallCompleted {
                         call_id,
                         result: tool_result.clone(),
                     });
 
                     let output_str = serde_json::to_string(&tool_result.output).unwrap_or_default();
-                    session.messages.push(Message { role: Role::Tool, content: output_str });
+                    session.messages.push(Message::tool_result(
+                        name.clone(),
+                        tool_call_id,
+                        output_str,
+                    ));
                     let _ = config
                         .artifact_store
                         .put(ArtifactRecord {
@@ -1039,19 +1188,20 @@ async fn run_turn_stream_inner(
             if consecutive_parse_failures >= 2 {
                 store.save(&req.session_id, &session).await?;
                 events.emit(AgentEvent::Error {
+                    session_id: req.session_id.clone(),
+                    step: Some(current_step),
                     error: "LLM produced invalid JSON after re-prompt".to_string(),
                 });
                 return Err(AgentError::Internal(
                     "LLM produced invalid JSON after re-prompt".into(),
                 ));
             }
-            session.messages.push(Message {
-                role: Role::User,
-                content: "Your response was not valid JSON. \
-                          Please respond with exactly one JSON object \
-                          matching the required schema."
-                    .into(),
-            });
+            session.messages.push(Message::text(
+                Role::User,
+                "Your response was not valid JSON. \
+                 Please respond with exactly one JSON object \
+                 matching the required schema.",
+            ));
         }
     }
 }
@@ -1948,7 +2098,7 @@ mod tests {
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                AgentEvent::SkillsSelected { skill_names }
+                AgentEvent::SkillsSelected { skill_names, .. }
                     if skill_names == &vec!["rust-review".to_string(), "security-audit".to_string()]
             )),
             "skills.selected event should be emitted with context skill names"
@@ -2121,10 +2271,10 @@ mod tests {
                     content: "ignored".to_string(),
                     usage: TokenUsage::default(),
                     finish_reason: FinishReason::Stop,
-                    tool_calls: vec![ToolCall {
-                        name: "search".to_string(),
-                        arguments: serde_json::json!({"q":"rust"}),
-                    }],
+                    tool_calls: vec![
+                        ToolCall::new("search", serde_json::json!({"q":"rust"}))
+                            .with_call_id("call-search-1"),
+                    ],
                 },
                 LlmResponse {
                     content: r#"{"type":"final","content":"done"}"#.to_string(),
@@ -2164,6 +2314,7 @@ mod tests {
             &checkpoint,
             &artifacts,
             &cost,
+            &crate::prompt::WindowContextCompactor::default(),
         )
         .await;
 
@@ -2174,6 +2325,28 @@ mod tests {
         };
         assert_eq!(resp.tool_transcript.len(), 1);
         assert_eq!(resp.tool_transcript[0].name, "search");
+
+        let saved = store.load(&"test-session".to_string()).await;
+        let saved = match saved {
+            Ok(Some(state)) => state,
+            other => panic!("expected saved state, got {other:?}"),
+        };
+        assert!(
+            saved.messages.iter().any(|message| {
+                message.role == Role::Assistant &&
+                    message.tool_calls.len() == 1 &&
+                    message.tool_calls[0].call_id.as_deref() == Some("call-search-1")
+            }),
+            "assistant tool call should be persisted structurally",
+        );
+        assert!(
+            saved.messages.iter().any(|message| {
+                message.role == Role::Tool &&
+                    message.tool_call_id.as_deref() == Some("call-search-1") &&
+                    message.tool_name.as_deref() == Some("search")
+            }),
+            "tool result should retain tool metadata",
+        );
     }
 
     #[tokio::test]
@@ -2202,6 +2375,7 @@ mod tests {
             &checkpoint,
             &artifacts,
             &cost,
+            &crate::prompt::WindowContextCompactor::default(),
         )
         .await;
         assert!(result.is_ok(), "turn should succeed");
@@ -2317,8 +2491,88 @@ mod tests {
         );
     }
 
+    struct NativeStreamingBypassLlm {
+        complete_calls: std::sync::atomic::AtomicUsize,
+        complete_stream_calls: std::sync::atomic::AtomicUsize,
+        response: LlmResponse,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for NativeStreamingBypassLlm {
+        fn capabilities(&self) -> bob_core::types::LlmCapabilities {
+            bob_core::types::LlmCapabilities { native_tool_calling: true, streaming: true }
+        }
+
+        async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, LlmError> {
+            self.complete_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.response.clone())
+        }
+
+        async fn complete_stream(&self, _req: LlmRequest) -> Result<LlmStream, LlmError> {
+            self.complete_stream_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(LlmError::Provider(
+                "complete_stream() should be bypassed for native tool calling".to_string(),
+            ))
+        }
+    }
+
     #[tokio::test]
-    async fn tc19_non_consecutive_duplicate_tool_calls_are_allowed() {
+    async fn tc19_stream_native_tool_calling_bypasses_complete_stream() {
+        let llm_impl = Arc::new(NativeStreamingBypassLlm {
+            complete_calls: std::sync::atomic::AtomicUsize::new(0),
+            complete_stream_calls: std::sync::atomic::AtomicUsize::new(0),
+            response: LlmResponse {
+                content: r#"{"type":"final","content":"done"}"#.to_string(),
+                usage: TokenUsage { prompt_tokens: 2, completion_tokens: 1 },
+                finish_reason: FinishReason::Stop,
+                tool_calls: Vec::new(),
+            },
+        });
+        let llm: Arc<dyn LlmPort> = llm_impl.clone();
+        let tools: Arc<dyn ToolPort> = Arc::new(MockToolPort::empty());
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let sink = Arc::new(CollectingSink::new());
+        let sink_dyn: Arc<dyn EventSink> = sink.clone();
+
+        let stream_result = run_turn_stream(
+            llm,
+            tools,
+            store,
+            sink_dyn,
+            make_request("hello"),
+            generous_policy(),
+            "test-model".to_string(),
+        )
+        .await;
+        assert!(
+            stream_result.is_ok(),
+            "stream run should succeed through complete() for native tool calling"
+        );
+        let mut stream = match stream_result {
+            Ok(stream) => stream,
+            Err(_) => return,
+        };
+
+        while let Some(_event) = stream.next().await {}
+
+        assert_eq!(
+            llm_impl.complete_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "native tool-calling stream path should use complete()"
+        );
+        assert_eq!(
+            llm_impl.complete_stream_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "native tool-calling stream path should bypass complete_stream()"
+        );
+        assert!(
+            !sink.all_events().iter().any(|event| matches!(event, AgentEvent::Error { .. })),
+            "native-tool fallback should stay on the success path"
+        );
+    }
+
+    #[tokio::test]
+    async fn tc20_non_consecutive_duplicate_tool_calls_are_allowed() {
         let llm = SequentialLlm::from_contents(vec![
             r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
             r#"{"type":"tool_call","name":"tool_b","arguments":{"q":"docs"}}"#,
@@ -2369,7 +2623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tc20_excessive_consecutive_duplicate_tool_calls_are_blocked() {
+    async fn tc21_excessive_consecutive_duplicate_tool_calls_are_blocked() {
         let llm = SequentialLlm::from_contents(vec![
             r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
             r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
@@ -2429,7 +2683,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tc21_duplicate_block_path_records_artifact_and_cost() {
+    async fn tc22_duplicate_block_path_records_artifact_and_cost() {
         let llm = SequentialLlm::from_contents(vec![
             r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
             r#"{"type":"tool_call","name":"tool_a","arguments":{"q":"rust"}}"#,
@@ -2479,6 +2733,7 @@ mod tests {
             &checkpoint,
             &artifacts,
             &cost,
+            &crate::prompt::WindowContextCompactor::default(),
         )
         .await;
         assert!(matches!(&result, Ok(AgentRunResult::Finished(_))), "unexpected {result:?}");

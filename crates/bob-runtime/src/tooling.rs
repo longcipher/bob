@@ -116,12 +116,7 @@ mod tests {
     async fn timeout_layer_times_out_slow_calls() {
         let layer = TimeoutToolLayer::new(5);
         let wrapped = layer.wrap(Arc::new(SleepyToolPort));
-        let result = wrapped
-            .call_tool(ToolCall {
-                name: "local/sleep".to_string(),
-                arguments: serde_json::json!({}),
-            })
-            .await;
+        let result = wrapped.call_tool(ToolCall::new("local/sleep", serde_json::json!({}))).await;
         assert!(matches!(result, Err(ToolError::Timeout { .. })));
     }
 }

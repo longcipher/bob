@@ -16,9 +16,9 @@
 - 🤖 **Multi-Model Support**: Works with OpenAI, Anthropic, Google, Groq, and more
 - 🔧 **Tool Integration**: Connect to MCP servers for file operations, shell commands, and custom tools
 - 🎯 **Skill System**: Load and apply predefined skills for specialized tasks
-- 💬 **Interactive REPL**: Chat with the AI agent through a terminal interface
+- 💬 **Interactive REPL**: Chat through `AgentLoop` with slash commands like `/tools`, `/usage`, `/tape.info`, and `/handoff`
 - 🔄 **Streaming Responses**: Real-time streaming of LLM responses
-- 📊 **Observability**: Built-in tracing and event logging
+- 📊 **Observability**: Built-in tracing plus fanout-ready event sinks for hooks
 - 🏗️ **Clean Architecture**: Hexagonal (ports & adapters) design for extensibility
 
 ## Crates
@@ -36,7 +36,7 @@ This workspace contains the following crates:
 ## Architecture
 
 ```text
-bin/cli-agent        — CLI composition root (config, REPL)
+bin/cli-agent        — CLI composition root (config, AgentLoop REPL)
 crates/bob-core      — Domain types and port traits (LlmPort, ToolPort, SessionStore, EventSink)
 crates/bob-runtime   — Scheduler FSM, prompt builder, action parser, CompositeToolPort
 crates/bob-adapters  — Concrete adapter implementations (genai, rmcp, in-memory store, tracing)
@@ -179,7 +179,7 @@ export GEMINI_API_KEY="..."
 cargo run --bin bob-cli -- --config agent.toml
 ```
 
-The REPL prints `>` when ready. Type a message and press Enter. Use `/quit` to exit.
+The REPL prints `>` when ready. Type a message and press Enter. Use `/help` to inspect commands, `/usage` to inspect cumulative session tokens, and `/quit` to exit.
 
 ### Example Session
 

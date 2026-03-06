@@ -37,7 +37,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bob-runtime = "0.1"
+bob-runtime = "0.2.1"
 ```
 
 ### Example: Creating a Runtime
@@ -90,6 +90,7 @@ let result = runtime.run(request).await?;
 - **Tool Composition**: Aggregate multiple MCP servers or tool sources
 - **Turn Policies**: Configurable limits for steps, timeouts, and retries
 - **Health Monitoring**: Built-in health check endpoints
+- **AgentLoop Facade**: Unified slash-command + runtime orchestration for interactive clients
 
 ## Modules
 
