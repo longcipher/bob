@@ -381,7 +381,7 @@ fn score_skill(skill: &LoadedSkill, input_lower: &str, input_tokens: &[String]) 
         .filter(|tag| input_tokens.iter().any(|token| token == tag))
         .count();
     if tag_overlap > 0 {
-        score += 0.4 * tag_overlap as f64;
+        score = 0.4f64.mul_add(tag_overlap as f64, score);
     }
 
     let haystack = format!(
@@ -397,7 +397,7 @@ fn score_skill(skill: &LoadedSkill, input_lower: &str, input_tokens: &[String]) 
             keyword_hits += 1;
         }
     }
-    score += 0.2 * f64::from(keyword_hits.min(10));
+    score = 0.2f64.mul_add(f64::from(keyword_hits.min(10)), score);
 
     score
 }

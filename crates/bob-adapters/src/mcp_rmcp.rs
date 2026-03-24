@@ -158,14 +158,14 @@ impl ToolPort for McpToolAdapter {
         let arguments: Option<serde_json::Map<String, serde_json::Value>> =
             call.arguments.as_object().cloned();
 
+        let mut params = CallToolRequestParams::new(Cow::Owned(raw_name.to_string()));
+        if let Some(args) = arguments {
+            params = params.with_arguments(args);
+        }
+
         let result = self
             .service
-            .call_tool(CallToolRequestParams {
-                meta: None,
-                name: Cow::Owned(raw_name.to_string()),
-                arguments,
-                task: None,
-            })
+            .call_tool(params)
             .await
             .map_err(|e| ToolError::Execution(format!("call_tool failed: {e}")))?;
 

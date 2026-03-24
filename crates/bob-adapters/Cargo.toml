@@ -15,7 +15,12 @@ documentation = "https://docs.rs/bob-adapters"
 [features]
 default = ["llm-genai", "mcp-rmcp", "skills-agent", "observe-tracing"]
 llm-genai = ["dep:genai"]
-mcp-rmcp = ["dep:rmcp"]
+mcp-rmcp = [
+    "dep:rmcp",
+    "rmcp/client",
+    "rmcp/transport-child-process",
+    "tokio/process",
+]
 observe-tracing = ["dep:tracing"]
 skills-agent = ["dep:agent-skills"]
 store-memory = []
@@ -27,7 +32,7 @@ futures-util = { workspace = true }
 scc = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["process"] }
 
 # Feature-gated
 agent-skills = { workspace = true, optional = true }
