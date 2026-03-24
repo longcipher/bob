@@ -66,21 +66,29 @@
 // ── Modules ──────────────────────────────────────────────────────────
 
 pub mod channel;
+pub mod character;
 pub mod error;
 pub mod journal;
 pub mod ports;
+pub mod resilience;
+pub mod secrets;
 pub mod tape;
 pub mod tool_policy;
 pub mod types;
 
 // ── Re-exports ───────────────────────────────────────────────────────
 
+pub use character::Character;
 pub use error::{AgentError, CostError, LlmError, StoreError, ToolError};
 pub use journal::{JournalEntry, ToolJournalPort};
 pub use ports::{
     ApprovalPort, ArtifactStorePort, CostMeterPort, EventSink, LlmPort, SessionStore,
     TapeStorePort, ToolCatalogPort, ToolExecutorPort, ToolPolicyPort, ToolPort,
     TurnCheckpointStorePort,
+};
+pub use resilience::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError, CircuitState, ComponentHealth,
+    HealthStatus, RetryConfig,
 };
 pub use tool_policy::{
     intersect_allowlists, is_tool_allowed, merge_allowlists, normalize_tool_list, tools_match,

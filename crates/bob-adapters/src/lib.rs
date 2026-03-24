@@ -122,5 +122,8 @@ pub mod store_memory;
 #[cfg(feature = "observe-tracing")]
 pub mod observe;
 
+#[cfg(feature = "observe-tracing")]
+pub mod provider_router;
+
 #[cfg(feature = "observe-otel")]
 pub mod observe_otel;
