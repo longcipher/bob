@@ -381,7 +381,12 @@ mod tests {
             },
         });
 
-        let req = LlmRequest { model: "test-model".into(), messages: vec![], tools: vec![] };
+        let req = LlmRequest {
+            model: "test-model".into(),
+            messages: vec![],
+            tools: vec![],
+            output_schema: None,
+        };
 
         let resp = llm.complete(req).await;
         assert!(resp.is_ok(), "complete should succeed");
@@ -393,14 +398,8 @@ mod tests {
 
     #[tokio::test]
     async fn tool_port_list_and_call() {
-        let tools: Arc<dyn ToolPort> = Arc::new(MockToolPort {
-            tools: vec![ToolDescriptor {
-                id: "test/echo".into(),
-                description: "Echo tool".into(),
-                input_schema: serde_json::json!({}),
-                source: crate::types::ToolSource::Local,
-            }],
-        });
+        let tools: Arc<dyn ToolPort> =
+            Arc::new(MockToolPort { tools: vec![ToolDescriptor::new("test/echo", "Echo tool")] });
 
         let listed = tools.list_tools().await;
         assert!(listed.is_ok(), "list_tools should succeed");

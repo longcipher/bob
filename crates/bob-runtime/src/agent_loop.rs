@@ -336,6 +336,8 @@ impl AgentLoop {
             model: None,
             context,
             cancel_token: None,
+            output_schema: None,
+            max_output_retries: 0,
         };
 
         let result = self.runtime.run(req).await?;

@@ -179,20 +179,24 @@ fn resolve_tool_call_policy(req: &AgentRequest) -> ToolCallPolicy {
 fn prompt_options_for_mode(
     dispatch_mode: crate::DispatchMode,
     llm: &dyn LlmPort,
+    output_schema: Option<serde_json::Value>,
 ) -> crate::prompt::PromptBuildOptions {
-    match dispatch_mode {
+    let mut opts = match dispatch_mode {
         crate::DispatchMode::PromptGuided => crate::prompt::PromptBuildOptions::default(),
         crate::DispatchMode::NativePreferred => {
             if llm.capabilities().native_tool_calling {
                 crate::prompt::PromptBuildOptions {
                     include_action_schema: false,
                     include_tool_schema: false,
+                    ..Default::default()
                 }
             } else {
                 crate::prompt::PromptBuildOptions::default()
             }
         }
-    }
+    };
+    opts.structured_output = output_schema;
+    opts
 }
 
 fn parse_action_for_mode(
@@ -432,6 +436,8 @@ pub(crate) async fn run_turn_with_extensions(
     let mut tool_transcript: Vec<ToolResult> = Vec::new();
     let mut total_usage = TokenUsage::default();
     let mut consecutive_parse_failures: u32 = 0;
+    let mut consecutive_validation_failures: u32 = 0;
+    let max_output_retries = req.max_output_retries;
     // Loop protection: cap repeated identical calls, while allowing non-consecutive repeats.
     let mut last_tool_call_signature: Option<String> = None;
     let mut same_tool_call_streak: u32 = 0;
@@ -492,7 +498,7 @@ pub(crate) async fn run_turn_with_extensions(
             &session,
             &active_tools,
             &augmented_instructions,
-            prompt_options_for_mode(dispatch_mode, llm),
+            prompt_options_for_mode(dispatch_mode, llm, req.output_schema.clone()),
             context_compactor,
         )
         .await;
@@ -567,6 +573,31 @@ pub(crate) async fn run_turn_with_extensions(
                 consecutive_parse_failures = 0;
                 match action {
                     AgentAction::Final { content } => {
+                        // Structured output validation if schema is set.
+                        if let Some(ref schema) = req.output_schema {
+                            match crate::output_validation::validate_output_str(&content, schema) {
+                                Ok(_) => {}
+                                Err(validation_err) => {
+                                    consecutive_validation_failures += 1;
+                                    if consecutive_validation_failures > max_output_retries {
+                                        tracing::warn!(
+                                            session_id = %req.session_id,
+                                            "output schema validation failed after {} retries",
+                                            max_output_retries,
+                                        );
+                                        // Accept the output despite validation failure.
+                                    } else {
+                                        let prompt =
+                                            crate::output_validation::validation_error_prompt(
+                                                &content,
+                                                &validation_err,
+                                            );
+                                        session.messages.push(Message::text(Role::User, prompt));
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         return finish_turn(
                             store,
                             events,
@@ -976,7 +1007,7 @@ async fn run_turn_stream_inner(
             &session,
             &tool_descriptors,
             &system_instructions,
-            prompt_options_for_mode(config.dispatch_mode, llm.as_ref()),
+            prompt_options_for_mode(config.dispatch_mode, llm.as_ref(), req.output_schema.clone()),
             config.context_compactor.as_ref(),
         );
         events.emit(AgentEvent::LlmCallStarted {
@@ -1384,7 +1415,7 @@ mod tests {
             AgentEvent, AgentRequest, AgentRunResult, AgentStreamEvent, ApprovalContext,
             ApprovalDecision, ArtifactRecord, CancelToken, LlmRequest, LlmResponse, LlmStream,
             LlmStreamChunk, SessionId, SessionState, ToolCall, ToolDescriptor, ToolResult,
-            ToolSource, TurnCheckpoint,
+            TurnCheckpoint,
         },
     };
     use futures_util::StreamExt;
@@ -1453,12 +1484,10 @@ mod tests {
             results: Vec<Result<ToolResult, ToolError>>,
         ) -> Self {
             Self {
-                tools: vec![ToolDescriptor {
-                    id: tool_name.to_string(),
-                    description: format!("{tool_name} tool"),
-                    input_schema: serde_json::json!({"type": "object"}),
-                    source: ToolSource::Local,
-                }],
+                tools: vec![
+                    ToolDescriptor::new(tool_name, format!("{tool_name} tool"))
+                        .with_input_schema(serde_json::json!({"type": "object"})),
+                ],
                 call_results: Mutex::new(results.into()),
             }
         }
@@ -1726,6 +1755,8 @@ mod tests {
             model: None,
             context: bob_core::types::RequestContext::default(),
             cancel_token: None,
+            output_schema: None,
+            max_output_retries: 0,
         }
     }
 
@@ -2193,12 +2224,10 @@ mod tests {
             r#"{"type": "final", "content": "done"}"#,
         ]);
         let tools = NoCallToolPort {
-            tools: vec![ToolDescriptor {
-                id: "search".to_string(),
-                description: "search tool".to_string(),
-                input_schema: serde_json::json!({"type":"object"}),
-                source: ToolSource::Local,
-            }],
+            tools: vec![
+                ToolDescriptor::new("search", "search tool")
+                    .with_input_schema(serde_json::json!({"type":"object"})),
+            ],
         };
         let store = MemoryStore::new();
         let sink = CollectingSink::new();
@@ -2234,12 +2263,10 @@ mod tests {
             r#"{"type": "final", "content": "done"}"#,
         ]);
         let tools = NoCallToolPort {
-            tools: vec![ToolDescriptor {
-                id: "search".to_string(),
-                description: "search tool".to_string(),
-                input_schema: serde_json::json!({"type":"object"}),
-                source: ToolSource::Local,
-            }],
+            tools: vec![
+                ToolDescriptor::new("search", "search tool")
+                    .with_input_schema(serde_json::json!({"type":"object"})),
+            ],
         };
         let store = MemoryStore::new();
         let sink = CollectingSink::new();
@@ -2280,12 +2307,10 @@ mod tests {
             r#"{"type": "final", "content": "done"}"#,
         ]);
         let tools = NoCallToolPort {
-            tools: vec![ToolDescriptor {
-                id: "search".to_string(),
-                description: "search tool".to_string(),
-                input_schema: serde_json::json!({"type":"object"}),
-                source: ToolSource::Local,
-            }],
+            tools: vec![
+                ToolDescriptor::new("search", "search tool")
+                    .with_input_schema(serde_json::json!({"type":"object"})),
+            ],
         };
         let store = MemoryStore::new();
         let sink = CollectingSink::new();

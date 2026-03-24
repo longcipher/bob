@@ -77,14 +77,18 @@
 //! [`bob_core`]: https://docs.rs/bob-core
 //! [`bob_adapters`]: https://docs.rs/bob-adapters
 
+#![forbid(unsafe_code)]
+
 pub mod action;
 pub mod agent_loop;
 pub mod composite;
+pub mod output_validation;
 pub mod progressive_tools;
 pub mod prompt;
 pub mod router;
 pub mod scheduler;
 pub mod tooling;
+pub mod typed_builder;
 
 use std::sync::Arc;
 
@@ -697,6 +701,8 @@ mod tests {
             model: None,
             context: RequestContext::default(),
             cancel_token: None,
+            output_schema: None,
+            max_output_retries: 0,
         };
 
         let result = rt.run(req).await;
@@ -774,6 +780,8 @@ mod tests {
             model: None,
             context: RequestContext::default(),
             cancel_token: None,
+            output_schema: None,
+            max_output_retries: 0,
         };
 
         let result = runtime.run(req).await;

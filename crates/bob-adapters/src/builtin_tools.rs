@@ -21,7 +21,7 @@ use std::path::{Component, Path, PathBuf};
 
 use bob_core::{
     error::ToolError,
-    types::{ToolCall, ToolDescriptor, ToolResult, ToolSource},
+    types::{ToolCall, ToolDescriptor, ToolResult},
 };
 use serde_json::json;
 
@@ -221,55 +221,39 @@ impl BuiltinToolPort {
 impl bob_core::ports::ToolPort for BuiltinToolPort {
     async fn list_tools(&self) -> Result<Vec<ToolDescriptor>, ToolError> {
         Ok(vec![
-            ToolDescriptor {
-                id: "local/file_read".to_string(),
-                description: "Read file contents from the workspace".to_string(),
-                input_schema: json!({
+            ToolDescriptor::new("local/file_read", "Read file contents from the workspace")
+                .with_input_schema(json!({
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Relative path within workspace" }
                     },
                     "required": ["path"]
-                }),
-                source: ToolSource::Local,
-            },
-            ToolDescriptor {
-                id: "local/file_write".to_string(),
-                description: "Write content to a file in the workspace".to_string(),
-                input_schema: json!({
+                })),
+            ToolDescriptor::new("local/file_write", "Write content to a file in the workspace")
+                .with_input_schema(json!({
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Relative path within workspace" },
                         "content": { "type": "string", "description": "File content to write" }
                     },
                     "required": ["path", "content"]
-                }),
-                source: ToolSource::Local,
-            },
-            ToolDescriptor {
-                id: "local/file_list".to_string(),
-                description: "List directory contents in the workspace".to_string(),
-                input_schema: json!({
+                })),
+            ToolDescriptor::new("local/file_list", "List directory contents in the workspace")
+                .with_input_schema(json!({
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Relative directory path (default: '.')" }
                     }
-                }),
-                source: ToolSource::Local,
-            },
-            ToolDescriptor {
-                id: "local/shell_exec".to_string(),
-                description: "Execute a shell command in the workspace directory".to_string(),
-                input_schema: json!({
+                })),
+            ToolDescriptor::new("local/shell_exec", "Execute a shell command in the workspace directory")
+                .with_input_schema(json!({
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "description": "Shell command to execute" },
                         "timeout_ms": { "type": "integer", "description": "Timeout in milliseconds (default: 15000)" }
                     },
                     "required": ["command"]
-                }),
-                source: ToolSource::Local,
-            },
+                })),
         ])
     }
 

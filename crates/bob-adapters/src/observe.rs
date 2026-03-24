@@ -48,7 +48,15 @@
 
 use std::sync::Arc;
 
-use bob_core::{ports::EventSink, types::AgentEvent};
+use bob_core::{
+    instrumenter::{
+        Instrumenter, ModelErrorInfo, ModelRequestInfo, ModelResponseInfo,
+        OutputValidationErrorInfo, RunEndInfo, RunErrorInfo, RunStartInfo, ToolCallInfo,
+        ToolDiscoveredInfo, ToolEndInfo, ToolErrorInfo,
+    },
+    ports::EventSink,
+    types::AgentEvent,
+};
 
 /// Event sink that forwards every event to multiple child sinks.
 #[derive(Default)]
@@ -159,6 +167,77 @@ impl EventSink for TracingEventSink {
                 tracing::error!(session_id = %session_id, step, error = %error, "agent error");
             }
         }
+    }
+}
+
+// ── Tracing Instrumenter ──────────────────────────────────────────────
+
+/// An instrumenter that emits structured `tracing` events.
+///
+/// Provides fine-grained observation hooks using the `tracing` ecosystem.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TracingInstrumenter;
+
+impl Instrumenter for TracingInstrumenter {
+    fn on_run_start(&self, info: &RunStartInfo<'_>) {
+        tracing::info!(session_id = %info.session_id, model = %info.model, "run started");
+    }
+
+    fn on_run_end(&self, info: &RunEndInfo<'_>) {
+        tracing::info!(
+            session_id = %info.session_id,
+            reason = ?info.finish_reason,
+            prompt_tokens = info.usage.prompt_tokens,
+            completion_tokens = info.usage.completion_tokens,
+            "run completed",
+        );
+    }
+
+    fn on_run_error(&self, info: &RunErrorInfo<'_>) {
+        tracing::error!(session_id = %info.session_id, error = %info.error, "run failed");
+    }
+
+    fn on_model_request(&self, info: &ModelRequestInfo<'_>) {
+        tracing::info!(session_id = %info.session_id, step = info.step, model = %info.model, "model request");
+    }
+
+    fn on_model_response(&self, info: &ModelResponseInfo<'_>) {
+        tracing::info!(
+            session_id = %info.session_id,
+            step = info.step,
+            model = %info.model,
+            prompt_tokens = info.usage.prompt_tokens,
+            completion_tokens = info.usage.completion_tokens,
+            "model response",
+        );
+    }
+
+    fn on_model_error(&self, info: &ModelErrorInfo<'_>) {
+        tracing::warn!(session_id = %info.session_id, step = info.step, model = %info.model, error = %info.error, "model error");
+    }
+
+    fn on_tool_call(&self, info: &ToolCallInfo<'_>) {
+        tracing::info!(session_id = %info.session_id, step = info.step, tool = %info.tool, "tool call started");
+    }
+
+    fn on_tool_end(&self, info: &ToolEndInfo<'_>) {
+        if info.is_error {
+            tracing::warn!(session_id = %info.session_id, step = info.step, tool = %info.tool, "tool call completed with error");
+        } else {
+            tracing::info!(session_id = %info.session_id, step = info.step, tool = %info.tool, "tool call completed");
+        }
+    }
+
+    fn on_tool_error(&self, info: &ToolErrorInfo<'_>) {
+        tracing::error!(session_id = %info.session_id, step = info.step, tool = %info.tool, error = %info.error, "tool error");
+    }
+
+    fn on_tool_discovered(&self, info: &ToolDiscoveredInfo<'_>) {
+        tracing::info!(count = info.tools.len(), "tools discovered");
+    }
+
+    fn on_output_validation_error(&self, info: &OutputValidationErrorInfo<'_>) {
+        tracing::warn!(session_id = %info.session_id, error = %info.error, "output validation failed");
     }
 }
 

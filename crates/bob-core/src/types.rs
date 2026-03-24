@@ -50,6 +50,13 @@ pub struct AgentRequest {
     pub context: RequestContext,
     /// Optional cancellation handle.
     pub cancel_token: Option<CancelToken>,
+    /// Optional JSON Schema for structured output validation.
+    /// When set, the agent validates the final response against this schema
+    /// and re-prompts the LLM on validation failure.
+    pub output_schema: Option<serde_json::Value>,
+    /// Maximum number of re-prompts when output fails schema validation.
+    /// Defaults to 0 (no retries) when `output_schema` is `None`.
+    pub max_output_retries: u32,
 }
 
 /// Structured per-turn request context.
@@ -104,6 +111,19 @@ pub enum AgentAction {
 
 // ── Tool Types ───────────────────────────────────────────────────────
 
+/// Execution strategy for a tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    /// Default: tool executes immediately when the LLM requests it.
+    #[default]
+    Function,
+    /// Tool requires external approval before execution (human-in-the-loop).
+    Unapproved,
+    /// Tool is managed by an external system; execution is deferred.
+    External,
+}
+
 /// Description of an available tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDescriptor {
@@ -115,6 +135,66 @@ pub struct ToolDescriptor {
     pub input_schema: serde_json::Value,
     /// Where this tool lives.
     pub source: ToolSource,
+    /// Execution strategy for this tool.
+    #[serde(default)]
+    pub kind: ToolKind,
+    /// Per-tool timeout in milliseconds. `None` uses the turn-level default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// If `true`, this tool must execute sequentially (not in parallel with others).
+    #[serde(default)]
+    pub sequential: bool,
+}
+
+impl ToolDescriptor {
+    /// Create a new tool descriptor with default kind/timeout/sequential.
+    #[must_use]
+    pub fn new(id: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            description: description.into(),
+            input_schema: serde_json::Value::Object(Default::default()),
+            source: ToolSource::Local,
+            kind: ToolKind::default(),
+            timeout_ms: None,
+            sequential: false,
+        }
+    }
+
+    /// Set the tool kind (execution strategy).
+    #[must_use]
+    pub fn with_kind(mut self, kind: ToolKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Set a per-tool timeout in milliseconds.
+    #[must_use]
+    pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = Some(timeout_ms);
+        self
+    }
+
+    /// Mark this tool as requiring sequential execution.
+    #[must_use]
+    pub fn with_sequential(mut self) -> Self {
+        self.sequential = true;
+        self
+    }
+
+    /// Set the input schema.
+    #[must_use]
+    pub fn with_input_schema(mut self, schema: serde_json::Value) -> Self {
+        self.input_schema = schema;
+        self
+    }
+
+    /// Set the tool source.
+    #[must_use]
+    pub fn with_source(mut self, source: ToolSource) -> Self {
+        self.source = source;
+        self
+    }
 }
 
 /// Origin of a tool.
@@ -165,6 +245,9 @@ pub struct LlmRequest {
     pub messages: Vec<Message>,
     /// Available tools (may be empty).
     pub tools: Vec<ToolDescriptor>,
+    /// Optional JSON Schema for structured output validation.
+    /// When set, the LLM response is validated against this schema.
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// An LLM inference response (internal representation).

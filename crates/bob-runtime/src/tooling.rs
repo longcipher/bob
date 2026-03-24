@@ -85,8 +85,6 @@ impl ToolPort for TimeoutToolPort {
 mod tests {
     use std::sync::Arc;
 
-    use bob_core::types::ToolSource;
-
     use super::*;
 
     struct SleepyToolPort;
@@ -94,12 +92,10 @@ mod tests {
     #[async_trait::async_trait]
     impl ToolPort for SleepyToolPort {
         async fn list_tools(&self) -> Result<Vec<ToolDescriptor>, ToolError> {
-            Ok(vec![ToolDescriptor {
-                id: "local/sleep".to_string(),
-                description: "sleep".to_string(),
-                input_schema: serde_json::json!({"type":"object"}),
-                source: ToolSource::Local,
-            }])
+            Ok(vec![
+                ToolDescriptor::new("local/sleep", "sleep")
+                    .with_input_schema(serde_json::json!({"type":"object"})),
+            ])
         }
 
         async fn call_tool(&self, call: ToolCall) -> Result<ToolResult, ToolError> {

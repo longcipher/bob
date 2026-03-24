@@ -323,6 +323,7 @@ mod tests {
             model: "test-model".into(),
             messages: vec![bob_core::types::Message::text(bob_core::types::Role::User, "hello")],
             tools: vec![],
+            output_schema: None,
         }
     }
 

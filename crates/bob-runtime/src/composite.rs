@@ -127,20 +127,16 @@ mod tests {
     #[tokio::test]
     async fn lists_tools_from_all_ports() {
         let p1 = Arc::new(StubPort {
-            tools: vec![ToolDescriptor {
-                id: "mcp/fs/read_file".into(),
-                description: "Read a file".into(),
-                input_schema: serde_json::json!({}),
-                source: ToolSource::Mcp { server: "fs".into() },
-            }],
+            tools: vec![
+                ToolDescriptor::new("mcp/fs/read_file", "Read a file")
+                    .with_source(ToolSource::Mcp { server: "fs".into() }),
+            ],
         });
         let p2 = Arc::new(StubPort {
-            tools: vec![ToolDescriptor {
-                id: "mcp/git/log".into(),
-                description: "Git log".into(),
-                input_schema: serde_json::json!({}),
-                source: ToolSource::Mcp { server: "git".into() },
-            }],
+            tools: vec![
+                ToolDescriptor::new("mcp/git/log", "Git log")
+                    .with_source(ToolSource::Mcp { server: "git".into() }),
+            ],
         });
 
         let composite = CompositeToolPort::new(vec![
@@ -155,20 +151,16 @@ mod tests {
     #[tokio::test]
     async fn routes_call_to_correct_port() {
         let p1 = Arc::new(StubPort {
-            tools: vec![ToolDescriptor {
-                id: "mcp/fs/read_file".into(),
-                description: "Read".into(),
-                input_schema: serde_json::json!({}),
-                source: ToolSource::Mcp { server: "fs".into() },
-            }],
+            tools: vec![
+                ToolDescriptor::new("mcp/fs/read_file", "Read")
+                    .with_source(ToolSource::Mcp { server: "fs".into() }),
+            ],
         });
         let p2 = Arc::new(StubPort {
-            tools: vec![ToolDescriptor {
-                id: "mcp/git/log".into(),
-                description: "Log".into(),
-                input_schema: serde_json::json!({}),
-                source: ToolSource::Mcp { server: "git".into() },
-            }],
+            tools: vec![
+                ToolDescriptor::new("mcp/git/log", "Log")
+                    .with_source(ToolSource::Mcp { server: "git".into() }),
+            ],
         });
 
         let composite = CompositeToolPort::new(vec![

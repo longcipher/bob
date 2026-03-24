@@ -97,6 +97,7 @@ pub use bob_core as core;
 
 pub mod builtin_tools;
 pub mod journal_memory;
+pub mod openai_schema;
 pub mod tape_memory;
 
 #[cfg(feature = "llm-genai")]

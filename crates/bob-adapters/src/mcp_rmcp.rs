@@ -138,12 +138,12 @@ impl ToolPort for McpToolAdapter {
                 let schema_value = serde_json::to_value(t.input_schema.as_ref())
                     .unwrap_or_else(|_| serde_json::json!({"type": "object"}));
 
-                ToolDescriptor {
-                    id: format!("mcp/{}/{}", self.server_id, t.name),
-                    description: t.description.as_deref().unwrap_or_default().to_string(),
-                    input_schema: schema_value,
-                    source: ToolSource::Mcp { server: self.server_id.clone() },
-                }
+                ToolDescriptor::new(
+                    format!("mcp/{}/{}", self.server_id, t.name),
+                    t.description.as_deref().unwrap_or_default(),
+                )
+                .with_input_schema(schema_value)
+                .with_source(ToolSource::Mcp { server: self.server_id.clone() })
             })
             .collect();
 

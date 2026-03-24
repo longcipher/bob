@@ -112,6 +112,7 @@ fn is_blocked(name: &str) -> bool {
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
 

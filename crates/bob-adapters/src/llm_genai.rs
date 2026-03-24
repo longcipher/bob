@@ -299,6 +299,7 @@ mod tests {
                 Message::text(Role::User, "user msg"),
             ],
             tools: vec![],
+            output_schema: None,
         };
 
         let chat_req = to_chat_request(&req);
@@ -323,15 +324,14 @@ mod tests {
         let req = LlmRequest {
             model: "test-model".into(),
             messages: vec![Message::text(Role::User, "find rust docs")],
-            tools: vec![bob_core::types::ToolDescriptor {
-                id: "search".into(),
-                description: "Search indexed docs".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {"q": {"type": "string"}}
-                }),
-                source: bob_core::types::ToolSource::Local,
-            }],
+            tools: vec![
+                bob_core::types::ToolDescriptor::new("search", "Search indexed docs")
+                    .with_input_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {"q": {"type": "string"}}
+                    })),
+            ],
+            output_schema: None,
         };
 
         let chat_req = to_chat_request(&req);

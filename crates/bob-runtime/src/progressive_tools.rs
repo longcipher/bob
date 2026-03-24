@@ -123,18 +123,14 @@ impl ProgressiveToolView {
 
 #[cfg(test)]
 mod tests {
-    use bob_core::types::ToolSource;
     use serde_json::json;
 
     use super::*;
 
     fn make_tool(id: &str, desc: &str) -> ToolDescriptor {
-        ToolDescriptor {
-            id: id.to_string(),
-            description: desc.to_string(),
-            input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
-            source: ToolSource::Local,
-        }
+        ToolDescriptor::new(id, desc).with_input_schema(
+            json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )
     }
 
     #[test]

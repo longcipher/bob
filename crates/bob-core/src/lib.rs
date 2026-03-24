@@ -63,11 +63,15 @@
 //! [`bob_runtime`]: https://docs.rs/bob-runtime
 //! [`bob_adapters`]: https://docs.rs/bob-adapters
 
+#![deny(unsafe_code)]
+
 // ── Modules ──────────────────────────────────────────────────────────
 
 pub mod channel;
 pub mod character;
 pub mod error;
+pub mod error_classifier;
+pub mod instrumenter;
 pub mod journal;
 pub mod ports;
 pub mod resilience;
@@ -80,6 +84,14 @@ pub mod types;
 
 pub use character::Character;
 pub use error::{AgentError, CostError, LlmError, StoreError, ToolError};
+pub use error_classifier::{
+    FailoverConfig, FailoverResult, classify_agent_error, classify_llm_error,
+};
+pub use instrumenter::{
+    Instrumenter, ModelErrorInfo, ModelRequestInfo, ModelResponseInfo, NoopInstrumenter,
+    OutputValidationErrorInfo, RunEndInfo, RunErrorInfo, RunStartInfo, ToolCallInfo,
+    ToolDiscoveredInfo, ToolEndInfo, ToolErrorInfo,
+};
 pub use journal::{JournalEntry, ToolJournalPort};
 pub use ports::{
     ApprovalPort, ArtifactStorePort, CostMeterPort, EventSink, LlmPort, SessionStore,

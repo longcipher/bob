@@ -56,15 +56,17 @@ impl ContextCompactorPort for WindowContextCompactor {
 }
 
 /// Options controlling prompt shape for different dispatch strategies.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct PromptBuildOptions {
     pub include_action_schema: bool,
     pub include_tool_schema: bool,
+    /// Optional JSON Schema for structured output validation.
+    pub structured_output: Option<serde_json::Value>,
 }
 
 impl Default for PromptBuildOptions {
     fn default() -> Self {
-        Self { include_action_schema: true, include_tool_schema: true }
+        Self { include_action_schema: true, include_tool_schema: true, structured_output: None }
     }
 }
 
@@ -164,7 +166,12 @@ pub(crate) async fn build_llm_request_with_options(
     messages.push(system_msg);
     messages.extend(history);
 
-    LlmRequest { model: model.to_string(), messages, tools: tools.to_vec() }
+    LlmRequest {
+        model: model.to_string(),
+        messages,
+        tools: tools.to_vec(),
+        output_schema: options.structured_output,
+    }
 }
 
 /// Keeps at most `max` non-system messages, dropping the oldest first.
@@ -202,10 +209,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use bob_core::{
-        ports::ContextCompactorPort,
-        types::{SessionState, TokenUsage, ToolSource},
-    };
+    use bob_core::{ports::ContextCompactorPort, types::SessionState};
     use serde_json::json;
 
     use super::*;
@@ -213,12 +217,9 @@ mod tests {
     // ── Helpers ──────────────────────────────────────────────────────
 
     fn make_tool(id: &str) -> ToolDescriptor {
-        ToolDescriptor {
-            id: id.to_string(),
-            description: format!("{id} description"),
-            input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
-            source: ToolSource::Local,
-        }
+        ToolDescriptor::new(id, format!("{id} description")).with_input_schema(
+            json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )
     }
 
     fn msg(role: Role, content: &str) -> Message {
