@@ -254,6 +254,7 @@ impl AgentLoop {
                             &bob_core::types::SessionState {
                                 messages: Vec::new(),
                                 total_usage: retained_usage,
+                                ..Default::default()
                             },
                         )
                         .await?;
@@ -515,6 +516,7 @@ mod tests {
             state: SessionState {
                 messages: Vec::new(),
                 total_usage: TokenUsage { prompt_tokens: 12, completion_tokens: 8 },
+                ..Default::default()
             },
         });
         let loop_ = AgentLoop::new(Arc::new(StubRuntime), Arc::new(StubTools)).with_store(store);
@@ -538,6 +540,7 @@ mod tests {
             state: SessionState {
                 messages: Vec::new(),
                 total_usage: TokenUsage { prompt_tokens: 12, completion_tokens: 8 },
+                ..Default::default()
             },
         });
         let tape = Arc::new(MemoryTapeStore::default());
@@ -610,6 +613,7 @@ mod tests {
                     bob_core::types::Message::text(bob_core::types::Role::Assistant, "answer"),
                 ],
                 total_usage: TokenUsage { prompt_tokens: 21, completion_tokens: 13 },
+                ..Default::default()
             })),
         });
         let tape = Arc::new(MemoryTapeStore::default());

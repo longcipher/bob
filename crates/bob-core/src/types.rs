@@ -279,6 +279,12 @@ pub struct SessionState {
     pub messages: Vec<Message>,
     /// Cumulative token usage across turns.
     pub total_usage: TokenUsage,
+    /// Monotonically increasing version for CAS operations.
+    ///
+    /// Starts at `0` for a fresh session and is incremented on every
+    /// successful [`SessionStore::save`] or [`SessionStore::save_if_version`].
+    #[serde(default)]
+    pub version: u64,
 }
 
 // ── Observability Types ──────────────────────────────────────────────
@@ -495,6 +501,7 @@ mod tests {
                 },
             ],
             total_usage: TokenUsage { prompt_tokens: 11, completion_tokens: 7 },
+            ..Default::default()
         };
 
         let encoded = serde_json::to_value(&state).expect("session state should serialize");

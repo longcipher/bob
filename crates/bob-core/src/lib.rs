@@ -67,6 +67,7 @@
 
 pub mod channel;
 pub mod error;
+pub mod journal;
 pub mod ports;
 pub mod tape;
 pub mod tool_policy;
@@ -75,6 +76,7 @@ pub mod types;
 // ── Re-exports ───────────────────────────────────────────────────────
 
 pub use error::{AgentError, CostError, LlmError, StoreError, ToolError};
+pub use journal::{JournalEntry, ToolJournalPort};
 pub use ports::{
     ApprovalPort, ArtifactStorePort, CostMeterPort, EventSink, LlmPort, SessionStore,
     TapeStorePort, ToolCatalogPort, ToolExecutorPort, ToolPolicyPort, ToolPort,

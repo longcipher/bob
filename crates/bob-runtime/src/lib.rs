@@ -91,6 +91,7 @@ use std::sync::Arc;
 pub use bob_core as core;
 use bob_core::{
     error::{AgentError, CostError, StoreError, ToolError},
+    journal::{JournalEntry, ToolJournalPort},
     ports::{
         ApprovalPort, ArtifactStorePort, ContextCompactorPort, CostMeterPort, EventSink, LlmPort,
         SessionStore, ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
@@ -207,6 +208,29 @@ impl CostMeterPort for NoOpCostMeterPort {
     }
 }
 
+/// Default journal that never records or replays.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct NoOpToolJournalPort;
+
+#[async_trait::async_trait]
+impl ToolJournalPort for NoOpToolJournalPort {
+    async fn append(&self, _entry: JournalEntry) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn lookup(
+        &self,
+        _session_id: &SessionId,
+        _fingerprint: &str,
+    ) -> Result<Option<JournalEntry>, StoreError> {
+        Ok(None)
+    }
+
+    async fn entries(&self, _session_id: &SessionId) -> Result<Vec<JournalEntry>, StoreError> {
+        Ok(Vec::new())
+    }
+}
+
 // ── Bootstrap / Builder ───────────────────────────────────────────────
 
 /// Bootstrap contract for producing an [`AgentRuntime`].
@@ -236,6 +260,7 @@ pub struct RuntimeBuilder {
     artifact_store: Option<Arc<dyn ArtifactStorePort>>,
     cost_meter: Option<Arc<dyn CostMeterPort>>,
     context_compactor: Option<Arc<dyn ContextCompactorPort>>,
+    journal: Option<Arc<dyn ToolJournalPort>>,
 }
 
 impl std::fmt::Debug for RuntimeBuilder {
@@ -255,6 +280,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("has_artifact_store", &self.artifact_store.is_some())
             .field("has_cost_meter", &self.cost_meter.is_some())
             .field("has_context_compactor", &self.context_compactor.is_some())
+            .field("has_journal", &self.journal.is_some())
             .finish()
     }
 }
@@ -350,6 +376,12 @@ impl RuntimeBuilder {
     }
 
     #[must_use]
+    pub fn with_journal(mut self, journal: Arc<dyn ToolJournalPort>) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    #[must_use]
     pub fn add_tool_layer(mut self, layer: Arc<dyn ToolLayer>) -> Self {
         self.tool_layers.push(layer);
         self
@@ -385,6 +417,9 @@ impl RuntimeBuilder {
                 Arc::new(crate::prompt::WindowContextCompactor::default())
                     as Arc<dyn ContextCompactorPort>
             });
+        let journal: Arc<dyn ToolJournalPort> = self
+            .journal
+            .unwrap_or_else(|| Arc::new(NoOpToolJournalPort) as Arc<dyn ToolJournalPort>);
 
         let mut tools: Arc<dyn ToolPort> =
             self.tools.unwrap_or_else(|| Arc::new(NoOpToolPort) as Arc<dyn ToolPort>);
@@ -406,6 +441,7 @@ impl RuntimeBuilder {
             artifact_store,
             cost_meter,
             context_compactor,
+            journal,
         };
         Ok(Arc::new(rt))
     }
@@ -452,6 +488,7 @@ pub struct DefaultAgentRuntime {
     pub artifact_store: Arc<dyn ArtifactStorePort>,
     pub cost_meter: Arc<dyn CostMeterPort>,
     pub context_compactor: Arc<dyn ContextCompactorPort>,
+    pub journal: Arc<dyn ToolJournalPort>,
 }
 
 impl std::fmt::Debug for DefaultAgentRuntime {
@@ -478,6 +515,7 @@ impl AgentRuntime for DefaultAgentRuntime {
             self.artifact_store.as_ref(),
             self.cost_meter.as_ref(),
             self.context_compactor.as_ref(),
+            self.journal.as_ref(),
         )
         .await
     }
@@ -498,6 +536,7 @@ impl AgentRuntime for DefaultAgentRuntime {
             self.artifact_store.clone(),
             self.cost_meter.clone(),
             self.context_compactor.clone(),
+            self.journal.clone(),
         )
         .await
     }
@@ -649,6 +688,7 @@ mod tests {
             artifact_store: Arc::new(NoOpArtifactStorePort),
             cost_meter: Arc::new(NoOpCostMeterPort),
             context_compactor: Arc::new(crate::prompt::WindowContextCompactor::default()),
+            journal: Arc::new(NoOpToolJournalPort),
         });
 
         let req = AgentRequest {
@@ -686,6 +726,7 @@ mod tests {
             artifact_store: Arc::new(NoOpArtifactStorePort),
             cost_meter: Arc::new(NoOpCostMeterPort),
             context_compactor: Arc::new(crate::prompt::WindowContextCompactor::default()),
+            journal: Arc::new(NoOpToolJournalPort),
         };
 
         let health = rt.health().await;
@@ -718,7 +759,7 @@ mod tests {
                         Message::text(Role::User, "original-user"),
                         Message::text(Role::Assistant, "original-assistant"),
                     ],
-                    total_usage: TokenUsage::default(),
+                    ..Default::default()
                 },
             }))
             .with_events(Arc::new(StubSink { count: Mutex::new(0) }))

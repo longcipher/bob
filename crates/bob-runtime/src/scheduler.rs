@@ -43,6 +43,7 @@ use std::sync::Arc;
 
 use bob_core::{
     error::AgentError,
+    journal::{JournalEntry, ToolJournalPort},
     normalize_tool_list,
     ports::{
         ApprovalPort, ArtifactStorePort, ContextCompactorPort, CostMeterPort, EventSink, LlmPort,
@@ -56,7 +57,9 @@ use bob_core::{
 };
 use futures_util::StreamExt;
 use tokio::time::Instant;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+
+/// Default capacity for the bounded streaming channel.
+const STREAM_CHANNEL_CAPACITY: usize = 256;
 
 /// Safety net that guarantees turn termination by tracking steps,
 /// tool calls, consecutive errors, and elapsed time against [`TurnPolicy`] limits.
@@ -312,6 +315,7 @@ pub async fn run_turn(
     let artifact_store = crate::NoOpArtifactStorePort;
     let cost_meter = crate::NoOpCostMeterPort;
     let compactor = crate::prompt::WindowContextCompactor::default();
+    let journal = crate::NoOpToolJournalPort;
     run_turn_with_extensions(
         llm,
         tools,
@@ -327,6 +331,7 @@ pub async fn run_turn(
         &artifact_store,
         &cost_meter,
         &compactor,
+        &journal,
     )
     .await
 }
@@ -358,6 +363,7 @@ pub(crate) async fn run_turn_with_controls(
     let artifact_store = crate::NoOpArtifactStorePort;
     let cost_meter = crate::NoOpCostMeterPort;
     let compactor = crate::prompt::WindowContextCompactor::default();
+    let journal = crate::NoOpToolJournalPort;
     run_turn_with_extensions(
         llm,
         tools,
@@ -373,6 +379,7 @@ pub(crate) async fn run_turn_with_controls(
         &artifact_store,
         &cost_meter,
         &compactor,
+        &journal,
     )
     .await
 }
@@ -397,6 +404,7 @@ pub(crate) async fn run_turn_with_extensions(
     artifact_store: &dyn ArtifactStorePort,
     cost_meter: &dyn CostMeterPort,
     context_compactor: &dyn ContextCompactorPort,
+    journal: &dyn ToolJournalPort,
 ) -> Result<AgentRunResult, AgentError> {
     let model = req.model.as_deref().unwrap_or(default_model);
     let cancel_token = req.cancel_token.clone();
@@ -662,17 +670,47 @@ pub(crate) async fn run_turn_with_extensions(
                             selected_skills: selected_skills.clone(),
                         };
 
-                        let tool_result = execute_tool_call(
-                            tools,
-                            &mut guard,
-                            ToolCall::new(name.clone(), arguments),
-                            &tool_call_policy,
-                            tool_policy_port,
-                            approval_port,
-                            &approval_context,
-                            policy.tool_timeout_ms,
-                        )
-                        .await;
+                        // Journal lookup for idempotent replay.
+                        let call_fingerprint = JournalEntry::fingerprint(&name, &arguments);
+                        let tool_result = if let Ok(Some(cached)) =
+                            journal.lookup(&req.session_id, &call_fingerprint).await
+                        {
+                            tracing::debug!(
+                                session_id = %req.session_id,
+                                tool = %name,
+                                "replaying tool result from journal"
+                            );
+                            ToolResult {
+                                name: cached.tool_name,
+                                output: cached.result,
+                                is_error: cached.is_error,
+                            }
+                        } else {
+                            let result = execute_tool_call(
+                                tools,
+                                &mut guard,
+                                ToolCall::new(name.clone(), arguments.clone()),
+                                &tool_call_policy,
+                                tool_policy_port,
+                                approval_port,
+                                &approval_context,
+                                policy.tool_timeout_ms,
+                            )
+                            .await;
+                            // Record in journal for future replay.
+                            let _ = journal
+                                .append(JournalEntry {
+                                    session_id: req.session_id.clone(),
+                                    call_fingerprint: call_fingerprint.clone(),
+                                    tool_name: name.clone(),
+                                    arguments: arguments.clone(),
+                                    result: result.output.clone(),
+                                    is_error: result.is_error,
+                                    timestamp_ms: bob_core::tape::now_ms(),
+                                })
+                                .await;
+                            result
+                        };
 
                         guard.record_tool_call();
                         let _ = cost_meter.record_tool_result(&req.session_id, &tool_result).await;
@@ -775,6 +813,7 @@ pub async fn run_turn_stream(
     let cost_meter: Arc<dyn CostMeterPort> = Arc::new(crate::NoOpCostMeterPort);
     let context_compactor: Arc<dyn ContextCompactorPort> =
         Arc::new(crate::prompt::WindowContextCompactor::default());
+    let journal: Arc<dyn ToolJournalPort> = Arc::new(crate::NoOpToolJournalPort);
     run_turn_stream_with_controls(
         llm,
         tools,
@@ -790,6 +829,7 @@ pub async fn run_turn_stream(
         artifact_store,
         cost_meter,
         context_compactor,
+        journal,
     )
     .await
 }
@@ -814,8 +854,9 @@ pub(crate) async fn run_turn_stream_with_controls(
     artifact_store: Arc<dyn ArtifactStorePort>,
     cost_meter: Arc<dyn CostMeterPort>,
     context_compactor: Arc<dyn ContextCompactorPort>,
+    journal: Arc<dyn ToolJournalPort>,
 ) -> Result<AgentEventStream, AgentError> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentStreamEvent>();
+    let (tx, rx) = flume::bounded::<AgentStreamEvent>(STREAM_CHANNEL_CAPACITY);
     let config = StreamRunConfig {
         policy,
         default_model,
@@ -826,16 +867,17 @@ pub(crate) async fn run_turn_stream_with_controls(
         artifact_store,
         cost_meter,
         context_compactor,
+        journal,
     };
 
     tokio::spawn(async move {
         if let Err(err) = run_turn_stream_inner(llm, tools, store, events, req, &config, &tx).await
         {
-            let _ = tx.send(AgentStreamEvent::Error { error: err.to_string() });
+            let _ = tx.send_async(AgentStreamEvent::Error { error: err.to_string() }).await;
         }
     });
 
-    Ok(Box::pin(UnboundedReceiverStream::new(rx)))
+    Ok(Box::pin(rx.into_stream()))
 }
 
 struct StreamRunConfig {
@@ -848,6 +890,7 @@ struct StreamRunConfig {
     artifact_store: Arc<dyn ArtifactStorePort>,
     cost_meter: Arc<dyn CostMeterPort>,
     context_compactor: Arc<dyn ContextCompactorPort>,
+    journal: Arc<dyn ToolJournalPort>,
 }
 
 async fn run_turn_stream_inner(
@@ -857,7 +900,7 @@ async fn run_turn_stream_inner(
     events: Arc<dyn EventSink>,
     req: AgentRequest,
     config: &StreamRunConfig,
-    tx: &tokio::sync::mpsc::UnboundedSender<AgentStreamEvent>,
+    tx: &flume::Sender<AgentStreamEvent>,
 ) -> Result<(), AgentError> {
     let model = req.model.as_deref().unwrap_or(&config.default_model);
     let cancel_token = req.cancel_token.clone();
@@ -900,8 +943,10 @@ async fn run_turn_stream_inner(
                 usage: total_usage.clone(),
             });
             store.save(&req.session_id, &session).await?;
-            let _ = tx.send(AgentStreamEvent::Error { error: "turn cancelled".to_string() });
-            let _ = tx.send(AgentStreamEvent::Finished { usage: total_usage.clone() });
+            let _ = tx
+                .send_async(AgentStreamEvent::Error { error: "turn cancelled".to_string() })
+                .await;
+            let _ = tx.send_async(AgentStreamEvent::Finished { usage: total_usage.clone() }).await;
             return Ok(());
         }
 
@@ -921,8 +966,8 @@ async fn run_turn_stream_inner(
                 usage: total_usage.clone(),
             });
             store.save(&req.session_id, &session).await?;
-            let _ = tx.send(AgentStreamEvent::Error { error: msg });
-            let _ = tx.send(AgentStreamEvent::Finished { usage: total_usage.clone() });
+            let _ = tx.send_async(AgentStreamEvent::Error { error: msg }).await;
+            let _ = tx.send_async(AgentStreamEvent::Finished { usage: total_usage.clone() }).await;
             return Ok(());
         }
 
@@ -956,7 +1001,9 @@ async fn run_turn_stream_inner(
                         match item {
                             Ok(bob_core::types::LlmStreamChunk::TextDelta(delta)) => {
                                 assistant_content.push_str(&delta);
-                                let _ = tx.send(AgentStreamEvent::TextDelta { content: delta });
+                                let _ = tx
+                                    .send_async(AgentStreamEvent::TextDelta { content: delta })
+                                    .await;
                             }
                             Ok(bob_core::types::LlmStreamChunk::Done { usage }) => {
                                 llm_usage = usage;
@@ -988,7 +1035,8 @@ async fn run_turn_stream_inner(
             llm_usage = llm_response.usage;
             llm_finish_reason = llm_response.finish_reason;
             llm_tool_calls = llm_response.tool_calls;
-            let _ = tx.send(AgentStreamEvent::TextDelta { content: llm_response.content });
+            let _ =
+                tx.send_async(AgentStreamEvent::TextDelta { content: llm_response.content }).await;
         }
 
         guard.record_step();
@@ -1046,7 +1094,9 @@ async fn run_turn_stream_inner(
                         finish_reason: FinishReason::Stop,
                         usage: total_usage.clone(),
                     });
-                    let _ = tx.send(AgentStreamEvent::Finished { usage: total_usage.clone() });
+                    let _ = tx
+                        .send_async(AgentStreamEvent::Finished { usage: total_usage.clone() })
+                        .await;
                     return Ok(());
                 }
                 AgentAction::ToolCall { name, arguments } => {
@@ -1137,17 +1187,48 @@ async fn run_turn_stream_inner(
                         selected_skills: selected_skills.clone(),
                     };
 
-                    let tool_result = execute_tool_call(
-                        tools.as_ref(),
-                        &mut guard,
-                        ToolCall::new(name.clone(), arguments),
-                        &tool_call_policy,
-                        config.tool_policy.as_ref(),
-                        config.approval.as_ref(),
-                        &approval_context,
-                        config.policy.tool_timeout_ms,
-                    )
-                    .await;
+                    // Journal lookup for idempotent replay.
+                    let call_fingerprint = JournalEntry::fingerprint(&name, &arguments);
+                    let tool_result = if let Ok(Some(cached)) =
+                        config.journal.lookup(&req.session_id, &call_fingerprint).await
+                    {
+                        tracing::debug!(
+                            session_id = %req.session_id,
+                            tool = %name,
+                            "replaying tool result from journal"
+                        );
+                        ToolResult {
+                            name: cached.tool_name,
+                            output: cached.result,
+                            is_error: cached.is_error,
+                        }
+                    } else {
+                        let result = execute_tool_call(
+                            tools.as_ref(),
+                            &mut guard,
+                            ToolCall::new(name.clone(), arguments.clone()),
+                            &tool_call_policy,
+                            config.tool_policy.as_ref(),
+                            config.approval.as_ref(),
+                            &approval_context,
+                            config.policy.tool_timeout_ms,
+                        )
+                        .await;
+                        // Record in journal for future replay.
+                        let _ = config
+                            .journal
+                            .append(JournalEntry {
+                                session_id: req.session_id.clone(),
+                                call_fingerprint: call_fingerprint.clone(),
+                                tool_name: name.clone(),
+                                arguments: arguments.clone(),
+                                result: result.output.clone(),
+                                is_error: result.is_error,
+                                timestamp_ms: bob_core::tape::now_ms(),
+                            })
+                            .await;
+                        result
+                    };
 
                     guard.record_tool_call();
                     let _ =
@@ -2315,6 +2396,7 @@ mod tests {
             &artifacts,
             &cost,
             &crate::prompt::WindowContextCompactor::default(),
+            &crate::NoOpToolJournalPort,
         )
         .await;
 
@@ -2376,6 +2458,7 @@ mod tests {
             &artifacts,
             &cost,
             &crate::prompt::WindowContextCompactor::default(),
+            &crate::NoOpToolJournalPort,
         )
         .await;
         assert!(result.is_ok(), "turn should succeed");
@@ -2734,6 +2817,7 @@ mod tests {
             &artifacts,
             &cost,
             &crate::prompt::WindowContextCompactor::default(),
+            &crate::NoOpToolJournalPort,
         )
         .await;
         assert!(matches!(&result, Ok(AgentRunResult::Finished(_))), "unexpected {result:?}");

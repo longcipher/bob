@@ -17,35 +17,11 @@
 //! - Production environments requiring persistence
 //! - Horizontal scaling
 //!
-//! ## Example
+//! ## CAS Support
 //!
-//! ```rust,ignore
-//! use bob_adapters::store_memory::InMemorySessionStore;
-//! use bob_core::{
-//!     ports::SessionStore,
-//!     types::{SessionState, Message, Role},
-//! };
-//!
-//! let store = InMemorySessionStore::new();
-//!
-//! // Save a session
-//! let state = SessionState {
-//!     messages: vec![Message {
-//!         role: Role::User,
-//!         content: "Hello".to_string(),
-//!     }],
-//!     ..Default::default()
-//! };
-//! store.save(&"session-1".to_string(), &state).await?;
-//!
-//! // Load the session
-//! let loaded = store.load(&"session-1".to_string()).await?;
-//! ```
-//!
-//! ## Thread Safety
-//!
-//! The store uses `scc::HashMap` which provides lock-free concurrent access,
-//! making it safe to share across multiple threads.
+//! The `save_if_version` method performs an atomic compare-and-swap: the
+//! session is only persisted when the stored version matches the expected
+//! version. On success the version is incremented atomically.
 
 use bob_core::{
     error::StoreError,
@@ -84,17 +60,57 @@ impl SessionStore for InMemorySessionStore {
     }
 
     async fn save(&self, id: &SessionId, state: &SessionState) -> Result<(), StoreError> {
-        // entry_async: insert if absent, overwrite if present.
         let entry = self.inner.entry_async(id.clone()).await;
         match entry {
             scc::hash_map::Entry::Occupied(mut occ) => {
-                occ.get_mut().clone_from(state);
+                let new_version = occ.get().version.saturating_add(1);
+                let mut updated = state.clone();
+                updated.version = new_version;
+                occ.get_mut().clone_from(&updated);
             }
             scc::hash_map::Entry::Vacant(vac) => {
-                let _ = vac.insert_entry(state.clone());
+                let mut initial = state.clone();
+                initial.version = initial.version.max(1);
+                let _ = vac.insert_entry(initial);
             }
         }
         Ok(())
+    }
+
+    async fn save_if_version(
+        &self,
+        id: &SessionId,
+        state: &SessionState,
+        expected_version: u64,
+    ) -> Result<u64, StoreError> {
+        let entry = self.inner.entry_async(id.clone()).await;
+        match entry {
+            scc::hash_map::Entry::Occupied(mut occ) => {
+                if occ.get().version != expected_version {
+                    return Err(StoreError::VersionConflict {
+                        expected: expected_version,
+                        actual: occ.get().version,
+                    });
+                }
+                let new_version = expected_version.saturating_add(1);
+                let mut updated = state.clone();
+                updated.version = new_version;
+                occ.get_mut().clone_from(&updated);
+                Ok(new_version)
+            }
+            scc::hash_map::Entry::Vacant(vac) => {
+                if expected_version != 0 {
+                    return Err(StoreError::VersionConflict {
+                        expected: expected_version,
+                        actual: 0,
+                    });
+                }
+                let mut initial = state.clone();
+                initial.version = 1;
+                let _ = vac.insert_entry(initial);
+                Ok(1)
+            }
+        }
     }
 }
 
@@ -129,6 +145,58 @@ mod tests {
         let loaded = store.load(&id).await.ok().flatten();
         assert!(loaded.is_some());
         assert_eq!(loaded.as_ref().map(|s| s.messages.len()), Some(1));
+        assert_eq!(loaded.as_ref().map(|s| s.version), Some(1));
+    }
+
+    #[tokio::test]
+    async fn save_increments_version() {
+        let store = InMemorySessionStore::new();
+        let id = "sess-v".to_string();
+        let state = SessionState::default();
+
+        store.save(&id, &state).await.ok();
+        let v1 = store.load(&id).await.ok().flatten().unwrap_or_default().version;
+        assert_eq!(v1, 1);
+
+        store.save(&id, &state).await.ok();
+        let v2 = store.load(&id).await.ok().flatten().unwrap_or_default().version;
+        assert_eq!(v2, 2);
+    }
+
+    #[tokio::test]
+    async fn save_if_version_succeeds_on_match() {
+        let store = InMemorySessionStore::new();
+        let id = "sess-cas".to_string();
+        let state = SessionState::default();
+
+        // First save (version starts at 0 -> becomes 1)
+        store.save(&id, &state).await.ok();
+        let loaded = store.load(&id).await.ok().flatten().unwrap_or_default();
+        assert_eq!(loaded.version, 1);
+
+        // CAS with correct version
+        let new_version = store.save_if_version(&id, &state, 1).await;
+        assert!(new_version.is_ok());
+        assert_eq!(new_version.unwrap_or_default(), 2);
+    }
+
+    #[tokio::test]
+    async fn save_if_version_fails_on_mismatch() {
+        let store = InMemorySessionStore::new();
+        let id = "sess-cas-fail".to_string();
+        let state = SessionState::default();
+
+        store.save(&id, &state).await.ok();
+
+        // CAS with stale version
+        let result = store.save_if_version(&id, &state, 0).await;
+        assert!(result.is_err());
+        if let Err(StoreError::VersionConflict { expected, actual }) = result {
+            assert_eq!(expected, 0);
+            assert_eq!(actual, 1);
+        } else {
+            panic!("expected VersionConflict");
+        }
     }
 
     #[tokio::test]
@@ -153,6 +221,7 @@ mod tests {
 
         let loaded = store.load(&id).await.ok().flatten();
         assert_eq!(loaded.as_ref().map(|s| s.messages.len()), Some(2));
+        assert_eq!(loaded.as_ref().map(|s| s.version), Some(2));
     }
 
     #[tokio::test]

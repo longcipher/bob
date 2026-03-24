@@ -433,7 +433,7 @@ mod tests {
     async fn prompt_build_message_ordering() {
         let session = SessionState {
             messages: vec![msg(Role::User, "hello"), msg(Role::Assistant, "hi")],
-            total_usage: TokenUsage::default(),
+            ..Default::default()
         };
         let req =
             build_llm_request("m", &session, &[], "sys", &WindowContextCompactor::default()).await;
@@ -445,7 +445,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_build_truncates_long_history() {
         let messages: Vec<Message> = (0..60).map(|i| msg(Role::User, &format!("m-{i}"))).collect();
-        let session = SessionState { messages, total_usage: TokenUsage::default() };
+        let session = SessionState { messages, ..Default::default() };
         let req =
             build_llm_request("m", &session, &[], "sys", &WindowContextCompactor::default()).await;
         // 1 system + 50 truncated history = 51
@@ -474,7 +474,7 @@ mod tests {
                 msg(Role::Assistant, "drop-me-too"),
                 msg(Role::User, "keep-me"),
             ],
-            total_usage: TokenUsage::default(),
+            ..Default::default()
         };
         let compactor = Arc::new(RecordingCompactor {
             invocations: AtomicUsize::new(0),

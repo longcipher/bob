@@ -240,8 +240,33 @@ pub trait SessionStore: Send + Sync {
     /// Load a session by ID. Returns `None` if not found.
     async fn load(&self, id: &SessionId) -> Result<Option<SessionState>, StoreError>;
 
-    /// Persist a session by ID.
+    /// Persist a session by ID. Increments the version unconditionally.
     async fn save(&self, id: &SessionId, state: &SessionState) -> Result<(), StoreError>;
+
+    /// Persist a session only if the current version matches `expected_version`.
+    ///
+    /// On success the store increments the version. On version mismatch the
+    /// store returns [`StoreError::VersionConflict`] with the actual version
+    /// found, allowing the caller to reload and retry.
+    async fn save_if_version(
+        &self,
+        id: &SessionId,
+        state: &SessionState,
+        expected_version: u64,
+    ) -> Result<u64, StoreError> {
+        // Default fallback: simple load-check-save. Adapters should override
+        // this with an atomic CAS for correctness under concurrency.
+        let current = self.load(id).await?;
+        let current_version = current.as_ref().map_or(0, |s| s.version);
+        if current_version != expected_version {
+            return Err(StoreError::VersionConflict {
+                expected: expected_version,
+                actual: current_version,
+            });
+        }
+        self.save(id, state).await?;
+        Ok(current_version.saturating_add(1))
+    }
 }
 
 // ── Event Sink ───────────────────────────────────────────────────────

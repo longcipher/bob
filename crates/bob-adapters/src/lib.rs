@@ -96,6 +96,7 @@
 pub use bob_core as core;
 
 pub mod builtin_tools;
+pub mod journal_memory;
 pub mod tape_memory;
 
 #[cfg(feature = "llm-genai")]
@@ -120,3 +121,6 @@ pub mod store_memory;
 
 #[cfg(feature = "observe-tracing")]
 pub mod observe;
+
+#[cfg(feature = "observe-otel")]
+pub mod observe_otel;

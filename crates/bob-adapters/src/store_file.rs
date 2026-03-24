@@ -149,18 +149,61 @@ impl SessionStore for FileSessionStore {
 
     async fn save(&self, id: &SessionId, state: &SessionState) -> Result<(), StoreError> {
         let _lock = self.write_guard.lock().await;
-        self.save_to_disk(id, state).await?;
+        let mut updated = state.clone();
+        // Read current version from cache or disk.
+        let current_version = self.cache.read_async(id, |_k, v| v.version).await.unwrap_or(0);
+        updated.version = current_version.saturating_add(1);
+        self.save_to_disk(id, &updated).await?;
 
         let entry = self.cache.entry_async(id.clone()).await;
         match entry {
             scc::hash_map::Entry::Occupied(mut occ) => {
-                occ.get_mut().clone_from(state);
+                occ.get_mut().clone_from(&updated);
             }
             scc::hash_map::Entry::Vacant(vac) => {
-                let _ = vac.insert_entry(state.clone());
+                let _ = vac.insert_entry(updated);
             }
         }
         Ok(())
+    }
+
+    async fn save_if_version(
+        &self,
+        id: &SessionId,
+        state: &SessionState,
+        expected_version: u64,
+    ) -> Result<u64, StoreError> {
+        let _lock = self.write_guard.lock().await;
+        // Read current version from cache or disk.
+        let current_version = if let Some(v) = self.cache.read_async(id, |_k, v| v.version).await {
+            v
+        } else {
+            let loaded = self.load_from_disk(id).await?;
+            loaded.map_or(0, |s| s.version)
+        };
+
+        if current_version != expected_version {
+            return Err(StoreError::VersionConflict {
+                expected: expected_version,
+                actual: current_version,
+            });
+        }
+
+        let new_version = expected_version.saturating_add(1);
+        let mut updated = state.clone();
+        updated.version = new_version;
+        self.save_to_disk(id, &updated).await?;
+
+        let entry = self.cache.entry_async(id.clone()).await;
+        match entry {
+            scc::hash_map::Entry::Occupied(mut occ) => {
+                occ.get_mut().clone_from(&updated);
+            }
+            scc::hash_map::Entry::Vacant(vac) => {
+                let _ = vac.insert_entry(updated);
+            }
+        }
+        Ok(new_version)
     }
 }
 
@@ -220,6 +263,7 @@ mod tests {
         let state = SessionState {
             messages: vec![Message::text(Role::User, "hello")],
             total_usage: bob_core::types::TokenUsage { prompt_tokens: 4, completion_tokens: 2 },
+            ..Default::default()
         };
 
         let first = FileSessionStore::new(temp_dir.path().to_path_buf());
