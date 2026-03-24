@@ -32,8 +32,43 @@ use serde::{Deserialize, Serialize};
 /// Opaque session identifier.
 pub type SessionId = String;
 
+/// Channel identifier for message routing.
+pub type ChannelId = String;
+
 /// Cancellation token (re-export for convenience).
 pub type CancelToken = tokio_util::sync::CancellationToken;
+
+// ── Message Bus Types ────────────────────────────────────────────────
+
+/// Inbound message from a chat channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboundMessage {
+    /// Origin channel identifier (e.g. `"slack"`, `"discord"`).
+    pub channel: ChannelId,
+    /// Sender's user identifier.
+    pub sender_id: String,
+    /// Chat or thread identifier within the channel.
+    pub chat_id: String,
+    /// Text content of the message.
+    pub content: String,
+    /// Timestamp in milliseconds since epoch.
+    pub timestamp_ms: u64,
+}
+
+/// Outbound message to a chat channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboundMessage {
+    /// Destination channel identifier.
+    pub channel: ChannelId,
+    /// Chat or thread identifier within the channel.
+    pub chat_id: String,
+    /// Text content of the message.
+    pub content: String,
+    /// Whether this is an in-progress (streaming) update rather than a final message.
+    pub is_progress: bool,
+    /// Optional message ID this message is replying to.
+    pub reply_to: Option<String>,
+}
 
 // ── Request / Response ───────────────────────────────────────────────
 
@@ -383,6 +418,8 @@ pub enum AgentEvent {
     ToolCallCompleted { session_id: SessionId, step: u32, name: String, is_error: bool },
     TurnCompleted { session_id: SessionId, finish_reason: FinishReason, usage: TokenUsage },
     Error { session_id: SessionId, step: Option<u32>, error: String },
+    SubagentSpawned { parent_session_id: SessionId, subagent_id: SessionId, task: String },
+    SubagentCompleted { subagent_id: SessionId, is_error: bool },
 }
 
 /// Streaming event for `run_stream`.
@@ -530,6 +567,104 @@ pub struct TurnContext {
     pub policy: TurnPolicy,
 }
 
+// ── Activity Journal ────────────────────────────────────────────────
+
+/// Activity journal entry.
+///
+/// Append-only record of agent activity including messages and system events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    /// Unix epoch milliseconds when this entry was recorded.
+    pub timestamp_ms: u64,
+    /// Session this entry belongs to.
+    pub session_key: String,
+    /// Role: `"user"`, `"agent"`, or `"system"`.
+    pub role: String,
+    /// Entry content or description.
+    pub content: String,
+    /// Optional event type (e.g. `"file_created"`, `"file_modified"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
+    /// Optional structured metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Query parameters for activity journal time-window search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityQuery {
+    /// Anchor timestamp in ms (center of window).
+    pub anchor_ms: u64,
+    /// Window width in minutes (symmetric around anchor).
+    pub window_minutes: u64,
+    /// Optional role filter (e.g. `"user"`, `"agent"`, `"system"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_filter: Option<String>,
+}
+
+impl ActivityQuery {
+    /// Compute the lower bound of the time window in milliseconds.
+    #[must_use]
+    pub fn lower_bound_ms(&self) -> u64 {
+        let half_window_ms = self.window_minutes.saturating_mul(60_000) / 2;
+        self.anchor_ms.saturating_sub(half_window_ms)
+    }
+
+    /// Compute the upper bound of the time window in milliseconds.
+    #[must_use]
+    pub fn upper_bound_ms(&self) -> u64 {
+        let half_window_ms = self.window_minutes.saturating_mul(60_000) / 2;
+        self.anchor_ms.saturating_add(half_window_ms)
+    }
+}
+
+// ── Subagent Types ────────────────────────────────────────────────────
+
+/// Request to spawn a subagent for background task execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentSpawn {
+    /// Human-readable task description for the subagent.
+    pub task: String,
+    /// Model override (None = inherit parent's default).
+    pub model: Option<String>,
+    /// Maximum steps for the subagent turn (None = use default policy).
+    pub max_steps: Option<u32>,
+    /// Tools the subagent is NOT allowed to use.
+    /// "subagent/spawn" is always denied to prevent recursive spawning.
+    pub deny_tools: Vec<String>,
+    /// Parent session ID for result correlation.
+    pub parent_session_id: SessionId,
+    /// Unique ID for this subagent invocation.
+    pub subagent_id: SessionId,
+}
+
+/// Access control decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessDecision {
+    Allow,
+    Deny,
+}
+
+/// Channel access policy configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChannelAccessPolicy {
+    /// Channel identifier (e.g. `"telegram"`, `"discord"`, `"cli"`).
+    pub channel: String,
+    /// Allowed sender IDs. Empty means allow all.
+    pub allow_from: Vec<String>,
+}
+
+/// Result delivered by a completed subagent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentResult {
+    pub subagent_id: SessionId,
+    pub parent_session_id: SessionId,
+    pub content: String,
+    pub usage: TokenUsage,
+    pub is_error: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -596,5 +731,59 @@ mod tests {
         assert_eq!(decoded.messages[0].tool_calls[0].call_id.as_deref(), Some("call-1"));
         assert_eq!(decoded.messages[1].tool_call_id.as_deref(), Some("call-1"));
         assert_eq!(decoded.messages[1].tool_name.as_deref(), Some("search"));
+    }
+
+    #[test]
+    fn inbound_message_serialization_roundtrip() {
+        let msg = InboundMessage {
+            channel: "slack".into(),
+            sender_id: "user-42".into(),
+            chat_id: "thread-7".into(),
+            content: "hello bot".into(),
+            timestamp_ms: 1_700_000_000_000,
+        };
+        let encoded = serde_json::to_value(&msg).expect("inbound message should serialize");
+        let decoded: InboundMessage =
+            serde_json::from_value(encoded).expect("inbound message should deserialize");
+        assert_eq!(decoded.channel, "slack");
+        assert_eq!(decoded.sender_id, "user-42");
+        assert_eq!(decoded.chat_id, "thread-7");
+        assert_eq!(decoded.content, "hello bot");
+        assert_eq!(decoded.timestamp_ms, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn outbound_message_serialization_roundtrip() {
+        let msg = OutboundMessage {
+            channel: "discord".into(),
+            chat_id: "channel-3".into(),
+            content: "here is the answer".into(),
+            is_progress: false,
+            reply_to: Some("msg-99".into()),
+        };
+        let encoded = serde_json::to_value(&msg).expect("outbound message should serialize");
+        let decoded: OutboundMessage =
+            serde_json::from_value(encoded).expect("outbound message should deserialize");
+        assert_eq!(decoded.channel, "discord");
+        assert_eq!(decoded.chat_id, "channel-3");
+        assert_eq!(decoded.content, "here is the answer");
+        assert!(!decoded.is_progress);
+        assert_eq!(decoded.reply_to.as_deref(), Some("msg-99"));
+    }
+
+    #[test]
+    fn outbound_message_without_reply_to_roundtrips() {
+        let msg = OutboundMessage {
+            channel: "cli".into(),
+            chat_id: "default".into(),
+            content: "streaming...".into(),
+            is_progress: true,
+            reply_to: None,
+        };
+        let encoded = serde_json::to_value(&msg).expect("outbound message should serialize");
+        let decoded: OutboundMessage =
+            serde_json::from_value(encoded).expect("outbound message should deserialize");
+        assert!(decoded.reply_to.is_none());
+        assert!(decoded.is_progress);
     }
 }

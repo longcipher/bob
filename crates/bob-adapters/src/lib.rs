@@ -96,6 +96,7 @@
 pub use bob_core as core;
 
 pub mod builtin_tools;
+pub mod journal_file;
 pub mod journal_memory;
 pub mod openai_schema;
 pub mod tape_memory;
@@ -109,6 +110,7 @@ pub mod mcp_rmcp;
 #[cfg(feature = "skills-agent")]
 pub mod skills_agent;
 
+pub mod access_control;
 pub mod approval_static;
 pub mod artifact_file;
 pub mod artifact_memory;

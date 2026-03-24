@@ -82,11 +82,13 @@
 pub mod action;
 pub mod agent_loop;
 pub mod composite;
+pub mod message_bus;
 pub mod output_validation;
 pub mod progressive_tools;
 pub mod prompt;
 pub mod router;
 pub mod scheduler;
+pub mod subagent;
 pub mod tooling;
 pub mod typed_builder;
 

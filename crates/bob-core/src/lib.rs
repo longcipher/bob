@@ -94,9 +94,9 @@ pub use instrumenter::{
 };
 pub use journal::{JournalEntry, ToolJournalPort};
 pub use ports::{
-    ApprovalPort, ArtifactStorePort, CostMeterPort, EventSink, LlmPort, SessionStore,
-    TapeStorePort, ToolCatalogPort, ToolExecutorPort, ToolPolicyPort, ToolPort,
-    TurnCheckpointStorePort,
+    AccessControlPort, ActivityJournalPort, ApprovalPort, ArtifactStorePort, CostMeterPort,
+    EventSink, LlmPort, MessageBusPort, SessionStore, SubagentPort, TapeStorePort, ToolCatalogPort,
+    ToolExecutorPort, ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
 };
 pub use resilience::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError, CircuitState, ComponentHealth,

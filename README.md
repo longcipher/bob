@@ -16,7 +16,11 @@
 - 🤖 **Multi-Model Support**: Works with OpenAI, Anthropic, Google, Groq, and more
 - 🔧 **Tool Integration**: Connect to MCP servers for file operations, shell commands, and custom tools
 - 🎯 **Skill System**: Load and apply predefined skills for specialized tasks
+- 👥 **Subagent Support**: Spawn independent background agents for parallel task execution
 - 💬 **Interactive REPL**: Chat through `AgentLoop` with slash commands like `/tools`, `/usage`, `/tape.info`, and `/handoff`
+- 🚌 **Message Bus**: Typed channel decoupling between chat adapters and agent runtime
+- 📓 **Activity Journal**: Append-only NDJSON log with natural language time queries
+- 🔒 **Access Control**: Per-channel sender allowlists for secure multi-user deployments
 - 🔄 **Streaming Responses**: Real-time streaming of LLM responses
 - 📊 **Observability**: Built-in tracing plus fanout-ready event sinks for hooks
 - 🏗️ **Clean Architecture**: Hexagonal (ports & adapters) design for extensibility
@@ -62,6 +66,101 @@ crates/bob-chat      — Chat channel types and streaming abstractions
 │  │          │  │          │  │  Store   │  │  Events  │   │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
 └─────────────────────────────────────────────────────────────┘
+```
+
+### System Flow
+
+```text
+  User (CLI / Chat Adapter / Telegram / Discord / Slack)
+         │
+         │ ChatEvent
+         v
+  +--------------+
+  │  ChatBot     │  Normalises events into InboundMessage.
+  │  (Adapters)  │  Applies per-channel allow_from whitelist.
+  │              │  Discards unknown senders silently.
+  +--------------+
+         │
+         │ InboundMessage pushed onto MessageBus (tokio mpsc)
+         v
+  +--------------+
+  │  AgentLoop   │  Session identified by channel + chat_id.
+  │  (Routing)   │  Slash commands handled deterministically.
+  │              │  Natural language forwarded to runtime.
+  +--------------+
+         │
+         │ AgentRequest
+         v
+  +-----------------+
+  │ AgentRuntime    │  6-state turn FSM:
+  │ (Scheduler)     │  Start → BuildPrompt → LlmInfer →
+  │                 │  ParseAction → CallTool → Done
+  +-----------------+
+         │
+         │ LLMRequest
+         v
+  +-----------------+
+  │ Provider Router │  Routes to active provider (genai).
+  +-----------------+
+         │
+         │ LLMResponse: text (final) or ToolCall list
+         v
+  +--------------+
+  │ Tool Loop    │  Executes via ToolRegistry.
+  │              │  Subagent spawn / MCP / builtin tools.
+  +--------------+
+         │
+         │ OutboundMessage via MessageBus
+         v
+  User receives response
+```
+
+### Subagent Architecture
+
+```text
+  Primary Agent (AgentRuntime)
+  │
+  ├── LLM returns tool_call: subagent/spawn
+  │        │
+  │        v
+  ├── SubagentPort.spawn()
+  │        │
+  │        │  tokio::spawn (independent task)
+  │        v
+  │   ┌─────────────────────┐
+  │   │ Subagent Instance   │
+  │   │ • Own session state  │
+  │   │ • Own tool registry  │
+  │   │ • Shared LLM port   │
+  │   │ • deny: subagent/*  │  ← prevents recursive spawning
+  │   │ • deny: message/*   │  ← prevents message loops
+  │   └────────┬────────────┘
+  │            │
+  │   oneshot::Sender → SubagentResult
+  │            │
+  │            v
+  │   ToolResult delivered back to parent
+  │
+  Primary continues or awaits result
+```
+
+### Crate Dependency Graph
+
+```text
+  bin/cli-agent (composition root)
+       │
+       ├── wires ──→ bob-runtime
+       │                 │
+       │                 └── depends only on ──→ bob-core
+       │
+       └── wires ──→ bob-adapters
+                         │
+                         └── depends only on ──→ bob-core
+
+  bob-chat ──→ bob-core (channel abstraction layer)
+
+  Dependency rule: bob-runtime NEVER imports bob-adapters.
+  bob-core has ZERO internal workspace dependencies.
 ```
 
 See [docs/design.md](docs/design.md) for the full design document.
@@ -332,13 +431,21 @@ Contributions are welcome! Please read our contributing guidelines before submit
 
 ## Roadmap
 
+- [x] Multi-model LLM support via genai
+- [x] MCP tool integration via rmcp
+- [x] Skill system with deterministic selection
+- [x] Interactive REPL with slash commands
+- [x] Streaming responses
+- [x] Session persistence (memory + file)
+- [x] Observability (tracing + OpenTelemetry)
+- [ ] Subagent spawning and management
+- [ ] Message bus decoupling (bot ↔ agent)
+- [ ] Activity journal with natural language queries
+- [ ] Access control (per-channel allowlists)
+- [ ] System monitor (filesystem watcher)
+- [ ] Cron scheduling (interval / at / cron expressions)
 - [ ] Persistent session storage (SQLite, PostgreSQL)
 - [ ] Web UI for agent interaction
-- [ ] Multi-agent collaboration
-- [ ] Custom skill marketplace
-- [ ] Agent memory and context management
-- [ ] Tool composition and chaining
-- [ ] More MCP server integrations
 
 ## License
 

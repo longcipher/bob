@@ -166,6 +166,27 @@ impl EventSink for TracingEventSink {
             AgentEvent::Error { session_id, step, error } => {
                 tracing::error!(session_id = %session_id, step, error = %error, "agent error");
             }
+            AgentEvent::SubagentSpawned { parent_session_id, subagent_id, task } => {
+                tracing::info!(
+                    parent_session_id = %parent_session_id,
+                    subagent_id = %subagent_id,
+                    task = %task,
+                    "subagent spawned",
+                );
+            }
+            AgentEvent::SubagentCompleted { subagent_id, is_error } => {
+                if is_error {
+                    tracing::warn!(
+                        subagent_id = %subagent_id,
+                        "subagent completed with error",
+                    );
+                } else {
+                    tracing::info!(
+                        subagent_id = %subagent_id,
+                        "subagent completed",
+                    );
+                }
+            }
         }
     }
 }

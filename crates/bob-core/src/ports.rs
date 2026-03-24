@@ -56,9 +56,10 @@ use crate::{
     error::{CostError, LlmError, StoreError, ToolError},
     tape::{TapeEntry, TapeEntryKind, TapeSearchResult},
     types::{
-        AgentEvent, ApprovalContext, ApprovalDecision, ArtifactRecord, LlmCapabilities, LlmRequest,
-        LlmResponse, LlmStream, Message, SessionId, SessionState, TokenUsage, ToolCall,
-        ToolDescriptor, ToolResult, TurnCheckpoint,
+        AccessDecision, ActivityEntry, ActivityQuery, AgentEvent, ApprovalContext,
+        ApprovalDecision, ArtifactRecord, ChannelAccessPolicy, InboundMessage, LlmCapabilities,
+        LlmRequest, LlmResponse, LlmStream, Message, OutboundMessage, SessionId, SessionState,
+        SubagentResult, TokenUsage, ToolCall, ToolDescriptor, ToolResult, TurnCheckpoint,
     },
 };
 
@@ -275,6 +276,86 @@ pub trait SessionStore: Send + Sync {
 pub trait EventSink: Send + Sync {
     /// Emit an agent event. Must not block.
     fn emit(&self, event: AgentEvent);
+}
+
+// ── Subagent Port ─────────────────────────────────────────────────────
+
+/// Port for spawning and managing background subagents.
+///
+/// Subagents run independently in their own Tokio tasks with their own
+/// session state and tool registry, but share the parent's LLM port.
+/// Recursive spawning is prevented by denying the `subagent/spawn` tool.
+#[async_trait::async_trait]
+pub trait SubagentPort: Send + Sync {
+    /// Spawn a new subagent task. Returns the subagent ID immediately.
+    async fn spawn(
+        &self,
+        task: String,
+        parent_session_id: SessionId,
+        model: Option<String>,
+        max_steps: Option<u32>,
+        extra_deny_tools: Vec<String>,
+    ) -> Result<SessionId, crate::error::AgentError>;
+
+    /// Await a subagent's result (blocks until completion).
+    async fn await_result(
+        &self,
+        subagent_id: &SessionId,
+    ) -> Result<SubagentResult, crate::error::AgentError>;
+
+    /// List currently active subagent IDs for a parent session.
+    async fn list_active(
+        &self,
+        parent_session_id: &SessionId,
+    ) -> Result<Vec<SessionId>, crate::error::AgentError>;
+
+    /// Cancel a running subagent.
+    async fn cancel(&self, subagent_id: &SessionId) -> Result<(), crate::error::AgentError>;
+}
+
+// ── Access Control ──────────────────────────────────────────────────
+
+/// Port for channel-level access control decisions.
+pub trait AccessControlPort: Send + Sync {
+    /// Check whether a sender is allowed on a channel.
+    fn check_access(&self, channel: &str, sender_id: &str) -> AccessDecision;
+    /// List all configured policies.
+    fn policies(&self) -> &[ChannelAccessPolicy];
+}
+
+// ── Message Bus Port ─────────────────────────────────────────────────
+
+/// Port for message bus communication between bot and agent layers.
+///
+/// Decouples chat adapters from the agent runtime by providing a typed
+/// async channel abstraction. The bot layer pushes [`InboundMessage`]s
+/// onto the bus, and the agent layer consumes them. The agent layer
+/// pushes [`OutboundMessage`]s for the bot layer to deliver to channels.
+#[async_trait::async_trait]
+pub trait MessageBusPort: Send + Sync {
+    /// Send an outbound message to the bus.
+    async fn send(&self, msg: OutboundMessage) -> Result<(), crate::error::AgentError>;
+
+    /// Receive the next inbound message (blocks until available).
+    async fn recv(&self) -> Result<InboundMessage, crate::error::AgentError>;
+}
+
+// ── Activity Journal Port ────────────────────────────────────────────
+
+/// Port for append-only activity journal with time-based queries.
+///
+/// Records agent activity (messages, system events) and supports querying
+/// entries within a symmetric time window around an anchor timestamp.
+#[async_trait::async_trait]
+pub trait ActivityJournalPort: Send + Sync {
+    /// Append an entry to the journal.
+    async fn append(&self, entry: ActivityEntry) -> Result<(), StoreError>;
+
+    /// Query entries within a time window.
+    async fn query(&self, query: &ActivityQuery) -> Result<Vec<ActivityEntry>, StoreError>;
+
+    /// Count total entries.
+    async fn count(&self) -> Result<u64, StoreError>;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────

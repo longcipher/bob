@@ -39,7 +39,7 @@ futures-util = { workspace = true }
 scc = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["process", "io-util"] }
 
 # Feature-gated
 agent-skills = { workspace = true, optional = true }
