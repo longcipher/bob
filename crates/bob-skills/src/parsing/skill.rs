@@ -20,18 +20,11 @@ use super::{
 /// use bob_skills::parsing::Skill;
 ///
 /// // Parse from SKILL.md content
-/// let content = r#"---
-/// name: my-skill
-/// description: Does something useful.
-/// ---
-/// # Instructions
-///
-/// Follow these steps...
-/// "#;
+/// let content = "---\nname: my-skill\ndescription: Does something useful.\n---\n# Instructions\n\nFollow these steps...\n";
 ///
 /// let skill = Skill::parse(content).unwrap();
 /// assert_eq!(skill.name().as_str(), "my-skill");
-/// assert!(skill.body().contains("# Instructions"));
+/// assert!(skill.body().contains("# Instructions"), "body was: {:?}", skill.body());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {

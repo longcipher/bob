@@ -76,6 +76,7 @@ pub mod event;
 pub mod file;
 pub mod message;
 pub mod modal;
+pub mod state;
 pub mod stream;
 pub mod thread;
 
@@ -103,5 +104,6 @@ pub use message::{
 pub use modal::{
     ModalChild, ModalElement, RadioSelectElement, SelectElement, SelectOption, TextInputElement,
 };
+pub use state::AppState;
 pub use stream::{StreamOptions, TextStream, fallback_stream};
 pub use thread::ThreadHandle;

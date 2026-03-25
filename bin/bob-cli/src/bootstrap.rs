@@ -40,6 +40,7 @@ pub(crate) struct CliRuntimeHandles {
     pub tools: Arc<dyn bob_adapters::core::ports::ToolPort>,
     pub store: Arc<dyn bob_adapters::core::ports::SessionStore>,
     pub tape: Arc<dyn bob_adapters::core::ports::TapeStorePort>,
+    #[expect(dead_code)]
     pub skills_context: Option<SkillsRuntimeContext>,
 }
 

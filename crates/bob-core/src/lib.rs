@@ -73,11 +73,13 @@ pub mod error;
 pub mod error_classifier;
 pub mod instrumenter;
 pub mod journal;
+pub mod native;
 pub mod ports;
 pub mod resilience;
 pub mod secrets;
 pub mod tape;
 pub mod tool_policy;
+pub mod typed_tool;
 pub mod types;
 
 // ── Re-exports ───────────────────────────────────────────────────────
@@ -93,6 +95,7 @@ pub use instrumenter::{
     ToolDiscoveredInfo, ToolEndInfo, ToolErrorInfo,
 };
 pub use journal::{JournalEntry, ToolJournalPort};
+pub use native::{NativeLlmPort, NativeSessionStore, NativeToolPort};
 pub use ports::{
     AccessControlPort, ActivityJournalPort, ApprovalPort, ArtifactStorePort, CostMeterPort,
     EventSink, LlmPort, MessageBusPort, SessionStore, SubagentPort, TapeStorePort, ToolCatalogPort,
@@ -105,4 +108,5 @@ pub use resilience::{
 pub use tool_policy::{
     intersect_allowlists, is_tool_allowed, merge_allowlists, normalize_tool_list, tools_match,
 };
+pub use typed_tool::{DynamicToolAdapter, TypedTool, tool_descriptor};
 pub use types::*;

@@ -199,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn send_and_recv_single_message() {
         let handle = MessageBusHandle::new(8);
-        let (agent, mut bot) = handle.split();
+        let (agent, bot) = handle.split();
 
         bot.push(sample_inbound("hello")).await.expect("push should succeed");
 
@@ -212,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_messages_received_in_order() {
         let handle = MessageBusHandle::new(16);
-        let (agent, mut bot) = handle.split();
+        let (agent, bot) = handle.split();
 
         for i in 0..5 {
             bot.push(sample_inbound(&format!("msg-{i}"))).await.expect("push should succeed");
@@ -272,7 +272,7 @@ mod tests {
     #[tokio::test]
     async fn send_returns_error_when_receiver_dropped() {
         let handle = MessageBusHandle::new(8);
-        let (agent, mut bot) = handle.split();
+        let (agent, bot) = handle.split();
 
         // Drop the bot side's outbound receiver by dropping the whole bot.
         // We need to extract and drop just the receiver — but since BotSideBus
@@ -286,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn builder_pattern_default_buffer() {
         let handle = MessageBusBuilder::new().build();
-        let (agent, mut bot) = handle.split();
+        let (agent, bot) = handle.split();
 
         bot.push(sample_inbound("test")).await.expect("push should succeed");
         let received = agent.recv().await.expect("recv should succeed");
@@ -296,7 +296,7 @@ mod tests {
     #[tokio::test]
     async fn builder_pattern_custom_buffer() {
         let handle = MessageBusBuilder::new().with_buffer_size(2).build();
-        let (agent, mut bot) = handle.split();
+        let (agent, bot) = handle.split();
 
         // Fill the small buffer.
         bot.push(sample_inbound("a")).await.expect("push should succeed");
@@ -310,7 +310,7 @@ mod tests {
     #[tokio::test]
     async fn agent_port_as_dyn_message_bus() {
         let handle = MessageBusHandle::new(8);
-        let (agent, mut bot) = handle.split();
+        let (agent, bot) = handle.split();
 
         let bus: Arc<dyn MessageBusPort> = Arc::new(agent);
 

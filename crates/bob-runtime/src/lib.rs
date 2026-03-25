@@ -88,9 +88,12 @@ pub mod progressive_tools;
 pub mod prompt;
 pub mod router;
 pub mod scheduler;
+pub mod session;
 pub mod subagent;
 pub mod tooling;
+pub mod tower_service;
 pub mod typed_builder;
+pub mod typestate;
 
 use std::sync::Arc;
 
@@ -108,7 +111,11 @@ use bob_core::{
         TurnCheckpoint, TurnPolicy,
     },
 };
+pub use session::{Agent, AgentBuilder, AgentResponse, Session};
 pub use tooling::{NoOpToolPort, TimeoutToolLayer, ToolLayer};
+pub use typestate::{
+    AgentRunner, AgentStepResult, AwaitingToolCall, Finished, Ready, RunnerContext,
+};
 
 /// Action dispatch mode for model responses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

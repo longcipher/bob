@@ -17,11 +17,13 @@ async-trait = { workspace = true }
 bob-core = { workspace = true }
 flume = { workspace = true }
 futures-util = { workspace = true }
-jsonschema = "0.45.0"
+jsonschema = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+tower = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 futures-util = { workspace = true }

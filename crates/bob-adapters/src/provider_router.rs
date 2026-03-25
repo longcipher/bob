@@ -269,14 +269,14 @@ mod tests {
     use super::*;
 
     struct MockLlm {
-        name: &'static str,
+        _name: &'static str,
         responses: Mutex<Vec<Result<LlmResponse, LlmError>>>,
     }
 
     impl MockLlm {
         fn succeeds(name: &'static str, content: &'static str) -> Self {
             Self {
-                name,
+                _name: name,
                 responses: Mutex::new(vec![Ok(LlmResponse {
                     content: content.into(),
                     usage: bob_core::types::TokenUsage::default(),
@@ -288,7 +288,7 @@ mod tests {
 
         fn always_fails(name: &'static str) -> Self {
             Self {
-                name,
+                _name: name,
                 responses: Mutex::new(vec![Err(LlmError::Provider(format!(
                     "{name}: simulated failure"
                 )))]),

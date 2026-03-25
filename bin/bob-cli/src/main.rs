@@ -16,13 +16,13 @@ mod request_context;
 
 use std::path::{Path, PathBuf};
 
-use bob_runtime::agent_loop::{AgentLoop, AgentLoopOutput, help_text};
+use bob_runtime::{Agent, Session};
 use clap::{Parser, Subcommand};
 use eyre::WrapErr;
 
 use crate::{
-    bootstrap::{CliRuntimeHandles, SkillsRuntimeContext, build_runtime},
-    request_context::build_request_context,
+    bootstrap::{CliRuntimeHandles, build_runtime},
+    config::AgentConfig,
 };
 
 /// Bob CLI — a general-purpose AI agent framework CLI.
@@ -140,11 +140,33 @@ fn print_help() {
 CLI session commands:
   /help, /h             Show this help message
   /new, /reset          Start a new session context
+  /quit, /q             Exit the REPL
 
-{}
-",
-        help_text()
+Available slash commands:
+  /tools                List available tools
+  /tool <name>          Describe a specific tool
+  /tape search <query>  Search tape history
+  /tape info            Show tape statistics
+  /anchors              List tape anchors
+  /handoff [name]       Create handoff checkpoint
+  /usage                Show session token usage
+"
     );
+}
+
+/// Build an Agent from configuration.
+async fn build_agent(cfg: &AgentConfig) -> eyre::Result<Agent> {
+    let CliRuntimeHandles { runtime, tools, store, tape, skills_context: _ } =
+        build_runtime(cfg).await?;
+
+    let mut builder = Agent::from_runtime(runtime, tools).with_store(store).with_tape(tape);
+
+    // Load system prompt from workspace file if it exists
+    if let Ok(prompt) = std::fs::read_to_string(".agent/system-prompt.md") {
+        builder = builder.with_system_prompt(prompt);
+    }
+
+    Ok(builder.build())
 }
 
 /// Run the interactive REPL loop.
@@ -153,21 +175,16 @@ CLI session commands:
     clippy::print_stderr,
     reason = "CLI REPL must use stdout/stderr for user interaction"
 )]
-async fn repl(
-    agent_loop: AgentLoop,
-    model: &str,
-    skills_context: Option<&SkillsRuntimeContext>,
-    policy: Option<&config::PolicyConfig>,
-) {
+async fn repl(mut session: Session, model: &str, cfg: &AgentConfig) {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
 
-    let mut session_seq: u64 = 1;
-    let mut session_id = format!("cli-session-{session_seq}");
+    let skills_context = bootstrap::build_skills_composer(cfg).ok().flatten();
 
     eprintln!("Bob agent ready  (model: {model})");
+    eprintln!("Session: {}", session.session_id());
     eprintln!("Type a message and press Enter. /help for commands.\n");
 
     loop {
@@ -195,31 +212,37 @@ async fn repl(
                     continue;
                 }
                 ReplCommand::NewSession => {
-                    session_seq = session_seq.saturating_add(1);
-                    session_id = format!("cli-session-{session_seq}");
-                    eprintln!("Started new session: {session_id}");
+                    session = session.new_session();
+                    eprintln!("Started new session: {}", session.session_id());
                     continue;
                 }
             }
         }
 
-        let context = build_request_context(&input, skills_context, policy);
-        match agent_loop.handle_input_with_context(&input, &session_id, context).await {
-            Ok(AgentLoopOutput::Response(bob_runtime::core::types::AgentRunResult::Finished(
-                resp,
-            ))) => {
-                println!("{}", resp.content);
-                println!(
-                    "\n[usage] prompt={} completion={} total={}",
-                    resp.usage.prompt_tokens,
-                    resp.usage.completion_tokens,
-                    resp.usage.total()
-                );
+        // Build request context with skills if available
+        let context = request_context::build_request_context(
+            &input,
+            skills_context.as_ref(),
+            cfg.policy.as_ref(),
+        );
+
+        match session.chat_with_context(&input, context).await {
+            Ok(response) => {
+                if response.is_quit {
+                    break;
+                }
+                if !response.content.is_empty() {
+                    println!("{}", response.content);
+                }
+                if response.usage.total() > 0 {
+                    println!(
+                        "\n[usage] prompt={} completion={} total={}",
+                        response.usage.prompt_tokens,
+                        response.usage.completion_tokens,
+                        response.usage.total()
+                    );
+                }
             }
-            Ok(AgentLoopOutput::CommandOutput(output)) => {
-                println!("{output}");
-            }
-            Ok(AgentLoopOutput::Quit) => break,
             Err(err) => {
                 eprintln!("Error: {err}");
             }
@@ -584,17 +607,11 @@ async fn main() -> eyre::Result<()> {
             let cfg = config::load_config(&cli.config)
                 .wrap_err_with(|| format!("failed to load config from '{}'", cli.config))?;
 
-            let CliRuntimeHandles { runtime, tools, store, tape, skills_context } =
-                build_runtime(&cfg).await?;
-            let agent_loop =
-                AgentLoop::new(runtime.clone(), tools.clone()).with_store(store).with_tape(tape);
-            repl(
-                agent_loop,
-                &cfg.runtime.default_model,
-                skills_context.as_ref(),
-                cfg.policy.as_ref(),
-            )
-            .await;
+            // Build agent using the new simplified API
+            let agent = build_agent(&cfg).await?;
+            let session = agent.start_session();
+
+            repl(session, &cfg.runtime.default_model, &cfg).await;
         }
         Commands::Skills(skills_cmd) => match skills_cmd {
             SkillsCommands::List {

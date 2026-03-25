@@ -27,12 +27,12 @@
 use std::sync::OnceLock;
 
 use bob_core::{ports::EventSink, types::AgentEvent};
-use opentelemetry::trace::SpanKind;
-use opentelemetry_otlp::SpanExporter;
+use opentelemetry::trace::{SpanKind, TracerProvider as _};
+use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{Resource, trace as sdktrace};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Keeps the OTel pipeline alive. Drop this to shut down export.
+#[derive(Debug)]
 pub struct OtlpGuard {
     _tracer_provider: sdktrace::SdkTracerProvider,
 }
@@ -70,7 +70,8 @@ pub async fn init_otel(
     INSTALL.get_or_init(|| {
         // The subscriber must already be initialised; we just add the OTel layer.
         // If no subscriber is installed, this is a no-op.
-        let _otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        let _otel_layer =
+            tracing_opentelemetry::layer::<tracing_subscriber::Registry>().with_tracer(tracer);
         // NOTE: The caller is responsible for installing the tracing subscriber
         // and adding this layer. We expose the tracer provider so advanced
         // users can add the layer themselves.
@@ -196,6 +197,30 @@ impl EventSink for OtlpEventSink {
                     error = %error,
                     "agent error",
                 );
+            }
+            AgentEvent::SubagentSpawned { parent_session_id, subagent_id, task } => {
+                tracing::info!(
+                    parent: &tracing::Span::current(),
+                    parent_session_id = %parent_session_id,
+                    subagent_id = %subagent_id,
+                    task = %task,
+                    "subagent spawned",
+                );
+            }
+            AgentEvent::SubagentCompleted { subagent_id, is_error } => {
+                if is_error {
+                    tracing::warn!(
+                        parent: &tracing::Span::current(),
+                        subagent_id = %subagent_id,
+                        "subagent completed with error",
+                    );
+                } else {
+                    tracing::info!(
+                        parent: &tracing::Span::current(),
+                        subagent_id = %subagent_id,
+                        "subagent completed",
+                    );
+                }
             }
         }
     }

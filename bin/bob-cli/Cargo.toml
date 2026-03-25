@@ -26,9 +26,9 @@ eyre = { workspace = true }
 genai = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-serde_yml = "0.0.12"
+serde_yml = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "io-util"] }
-toml = "0.9.11"
+toml = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [lints]
