@@ -1,5 +1,5 @@
 [package]
-name = "cli-agent"
+name = "bob-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,13 +19,16 @@ path = "src/main.rs"
 [dependencies]
 bob-adapters = { workspace = true }
 bob-runtime = { workspace = true }
+bob-skills = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 config = { workspace = true }
 eyre = { workspace = true }
 genai = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+serde_yml = "0.0.12"
 tokio = { workspace = true, features = ["io-std", "io-util"] }
+toml = "0.9.11"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [lints]
