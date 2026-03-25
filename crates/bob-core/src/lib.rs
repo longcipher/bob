@@ -108,5 +108,8 @@ pub use resilience::{
 pub use tool_policy::{
     intersect_allowlists, is_tool_allowed, merge_allowlists, normalize_tool_list, tools_match,
 };
-pub use typed_tool::{DynamicToolAdapter, TypedTool, tool_descriptor};
+pub use typed_tool::{
+    ChainedToolPorts, Complete, Described, FilteredToolPort, Incomplete, ToolKind, ToolPortExt,
+    ToolSource, TypedToolAdapter, TypedToolBuilder, TypedToolExt, TypedToolPort,
+};
 pub use types::*;

@@ -4,6 +4,18 @@
 //! composition with standard middleware (timeout, retry, rate limit, etc.)
 //! without reimplementing them in the framework.
 //!
+//! ## Design Philosophy
+//!
+//! This module demonstrates **extreme trait reuse** by leveraging `tower::Service`
+//! as the universal middleware abstraction instead of building custom middleware chains.
+//!
+//! ## Key Patterns
+//!
+//! - **Blanket implementations**: Every `ToolPort` automatically becomes a `tower::Service`
+//! - **Extension traits**: Fluent APIs for middleware composition
+//! - **Type-state builders**: Compile-time validation of middleware chains
+//! - **Associated types**: Bind request/response types to service definitions
+//!
 //! ## Example
 //!
 //! ```rust,ignore
@@ -15,6 +27,7 @@
 //! let tool_service = ToolService::new(my_tool_port);
 //! let guarded = ServiceBuilder::new()
 //!     .timeout(Duration::from_secs(15))
+//!     .rate_limit(10, Duration::from_secs(1))
 //!     .service(tool_service);
 //! ```
 
@@ -31,7 +44,55 @@ use bob_core::{
     types::{LlmRequest, LlmResponse, ToolCall, ToolDescriptor, ToolResult},
 };
 
-// ── Tool Service ─────────────────────────────────────────────────────
+// ── Core Service Types ───────────────────────────────────────────────
+
+/// Request type for tool execution services.
+#[derive(Debug, Clone)]
+pub struct ToolRequest {
+    /// The tool call to execute.
+    pub call: ToolCall,
+}
+
+impl ToolRequest {
+    /// Create a new tool request.
+    #[must_use]
+    pub fn new(call: ToolCall) -> Self {
+        Self { call }
+    }
+
+    /// Create a tool request from name and arguments.
+    #[must_use]
+    pub fn from_parts(name: impl Into<String>, arguments: serde_json::Value) -> Self {
+        Self { call: ToolCall::new(name, arguments) }
+    }
+}
+
+/// Response type for tool execution services.
+#[derive(Debug, Clone)]
+pub struct ToolResponse {
+    /// The tool execution result.
+    pub result: ToolResult,
+}
+
+/// Request type for LLM completion services.
+#[derive(Debug, Clone)]
+pub struct LlmRequestWrapper {
+    /// The LLM request to execute.
+    pub request: LlmRequest,
+}
+
+/// Response type for LLM completion services.
+#[derive(Debug, Clone)]
+pub struct LlmResponseWrapper {
+    /// The LLM response.
+    pub response: LlmResponse,
+}
+
+/// Request type for tool listing services.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ToolListRequest;
+
+// ── Tool Service (tower::Service wrapper) ─────────────────────────────
 
 /// A `tower::Service` wrapper around [`ToolPort::call_tool`].
 ///
@@ -55,22 +116,8 @@ impl std::fmt::Debug for ToolService {
     }
 }
 
-/// Request type for [`ToolService`].
-#[derive(Debug, Clone)]
-pub struct ToolServiceRequest {
-    /// The tool call to execute.
-    pub call: ToolCall,
-}
-
-/// Response type for [`ToolService`].
-#[derive(Debug, Clone)]
-pub struct ToolServiceResponse {
-    /// The tool execution result.
-    pub result: ToolResult,
-}
-
-impl tower::Service<ToolServiceRequest> for ToolService {
-    type Response = ToolServiceResponse;
+impl tower::Service<ToolRequest> for ToolService {
+    type Response = ToolResponse;
     type Error = ToolError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -78,16 +125,16 @@ impl tower::Service<ToolServiceRequest> for ToolService {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: ToolServiceRequest) -> Self::Future {
+    fn call(&mut self, req: ToolRequest) -> Self::Future {
         let inner = self.inner.clone();
         Box::pin(async move {
             let result = inner.call_tool(req.call).await?;
-            Ok(ToolServiceResponse { result })
+            Ok(ToolResponse { result })
         })
     }
 }
 
-// ── LLM Service ──────────────────────────────────────────────────────
+// ── LLM Service (tower::Service wrapper) ──────────────────────────────
 
 /// A `tower::Service` wrapper around [`LlmPort::complete`].
 ///
@@ -110,22 +157,8 @@ impl std::fmt::Debug for LlmService {
     }
 }
 
-/// Request type for [`LlmService`].
-#[derive(Debug, Clone)]
-pub struct LlmServiceRequest {
-    /// The LLM request to execute.
-    pub request: LlmRequest,
-}
-
-/// Response type for [`LlmService`].
-#[derive(Debug, Clone)]
-pub struct LlmServiceResponse {
-    /// The LLM response.
-    pub response: LlmResponse,
-}
-
-impl tower::Service<LlmServiceRequest> for LlmService {
-    type Response = LlmServiceResponse;
+impl tower::Service<LlmRequestWrapper> for LlmService {
+    type Response = LlmResponseWrapper;
     type Error = LlmError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -133,11 +166,11 @@ impl tower::Service<LlmServiceRequest> for LlmService {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: LlmServiceRequest) -> Self::Future {
+    fn call(&mut self, req: LlmRequestWrapper) -> Self::Future {
         let inner = self.inner.clone();
         Box::pin(async move {
             let response = inner.complete(req.request).await?;
-            Ok(LlmServiceResponse { response })
+            Ok(LlmResponseWrapper { response })
         })
     }
 }
@@ -163,10 +196,6 @@ impl std::fmt::Debug for ToolListService {
     }
 }
 
-/// Request type for [`ToolListService`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ToolListRequest;
-
 impl tower::Service<ToolListRequest> for ToolListService {
     type Response = Vec<ToolDescriptor>;
     type Error = ToolError;
@@ -182,11 +211,125 @@ impl tower::Service<ToolListRequest> for ToolListService {
     }
 }
 
+// ── Extension Traits for Service Composition ──────────────────────────
+
+/// Extension trait for ergonomic service composition.
+///
+/// This provides a fluent API for building middleware stacks
+/// without manual `ServiceBuilder` boilerplate.
+pub trait ServiceExt<Request>: tower::Service<Request> + Sized {
+    /// Apply a timeout to this service.
+    fn with_timeout(self, timeout: std::time::Duration) -> tower::timeout::Timeout<Self> {
+        tower::timeout::Timeout::new(self, timeout)
+    }
+
+    /// Apply rate limiting to this service.
+    fn with_rate_limit(
+        self,
+        max: u64,
+        interval: std::time::Duration,
+    ) -> tower::limit::RateLimit<Self> {
+        tower::limit::RateLimit::new(self, tower::limit::rate::Rate::new(max, interval))
+    }
+
+    /// Apply concurrency limiting to this service.
+    fn with_concurrency_limit(self, max: usize) -> tower::limit::ConcurrencyLimit<Self> {
+        tower::limit::ConcurrencyLimit::new(self, max)
+    }
+
+    /// Map errors from this service.
+    fn map_err<F, E2>(self, f: F) -> tower::util::MapErr<Self, F>
+    where
+        F: FnOnce(Self::Error) -> E2,
+    {
+        tower::util::MapErr::new(self, f)
+    }
+
+    /// Map responses from this service.
+    fn map_response<F, Response2>(self, f: F) -> tower::util::MapResponse<Self, F>
+    where
+        F: FnOnce(Self::Response) -> Response2,
+    {
+        tower::util::MapResponse::new(self, f)
+    }
+
+    /// Box this service for dynamic dispatch.
+    fn boxed(self) -> tower::util::BoxService<Request, Self::Response, Self::Error>
+    where
+        Self: Send + 'static,
+        Request: Send + 'static,
+        Self::Future: Send + 'static,
+    {
+        tower::util::BoxService::new(self)
+    }
+}
+
+// Blanket implementation for all tower::Service implementations
+impl<T, Request> ServiceExt<Request> for T where T: tower::Service<Request> + Sized {}
+
+// ── Port Extension Traits ────────────────────────────────────────────
+
+/// Extension trait that converts a [`ToolPort`] into tower services.
+///
+/// This provides a fluent API for creating service instances from tool ports.
+pub trait ToolPortServiceExt: ToolPort {
+    /// Convert this tool port into a `tower::Service` for tool execution.
+    fn into_tool_service(self: Arc<Self>) -> ToolService;
+
+    /// Convert this tool port into a `tower::Service` for tool listing.
+    fn into_tool_list_service(self: Arc<Self>) -> ToolListService;
+}
+
+// Blanket implementation for all ToolPort implementations
+impl<T: ToolPort + 'static> ToolPortServiceExt for T {
+    fn into_tool_service(self: Arc<Self>) -> ToolService {
+        ToolService::new(self)
+    }
+
+    fn into_tool_list_service(self: Arc<Self>) -> ToolListService {
+        ToolListService::new(self)
+    }
+}
+
+// Implementation for trait objects
+impl ToolPortServiceExt for dyn ToolPort {
+    fn into_tool_service(self: Arc<Self>) -> ToolService {
+        ToolService::new(self)
+    }
+
+    fn into_tool_list_service(self: Arc<Self>) -> ToolListService {
+        ToolListService::new(self)
+    }
+}
+
+/// Extension trait that converts an [`LlmPort`] into a tower service.
+pub trait LlmPortServiceExt: LlmPort {
+    /// Convert this LLM port into a `tower::Service` for completions.
+    fn into_llm_service(self: Arc<Self>) -> LlmService;
+}
+
+// Blanket implementation for all LlmPort implementations
+impl<T: LlmPort + 'static> LlmPortServiceExt for T {
+    fn into_llm_service(self: Arc<Self>) -> LlmService {
+        LlmService::new(self)
+    }
+}
+
+// Implementation for trait objects
+impl LlmPortServiceExt for dyn LlmPort {
+    fn into_llm_service(self: Arc<Self>) -> LlmService {
+        LlmService::new(self)
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+
+    use bob_core::types::ToolDescriptor;
+    use tower::Service;
 
     use super::*;
 
@@ -222,10 +365,7 @@ mod tests {
         let port: Arc<dyn ToolPort> = Arc::new(MockToolPort::new());
         let mut svc = ToolService::new(port);
 
-        use tower::Service;
-        let resp = svc
-            .call(ToolServiceRequest { call: ToolCall::new("mock/echo", serde_json::json!({})) })
-            .await;
+        let resp = svc.call(ToolRequest::from_parts("mock/echo", serde_json::json!({}))).await;
         assert!(resp.is_ok());
         assert_eq!(resp.unwrap().result.name, "mock/echo");
     }
@@ -235,9 +375,29 @@ mod tests {
         let port: Arc<dyn ToolPort> = Arc::new(MockToolPort::new());
         let mut svc = ToolListService::new(port);
 
-        use tower::Service;
         let tools = svc.call(ToolListRequest).await.expect("should list tools");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].id, "mock/echo");
+    }
+
+    #[tokio::test]
+    async fn service_ext_timeout() {
+        let port: Arc<dyn ToolPort> = Arc::new(MockToolPort::new());
+        let svc = ToolService::new(port);
+
+        let mut timeout_svc = svc.with_timeout(std::time::Duration::from_secs(1));
+
+        let resp =
+            timeout_svc.call(ToolRequest::from_parts("mock/echo", serde_json::json!({}))).await;
+        assert!(resp.is_ok());
+    }
+
+    #[tokio::test]
+    async fn port_service_ext() {
+        let port: Arc<dyn ToolPort> = Arc::new(MockToolPort::new());
+        let mut svc = port.into_tool_service();
+
+        let resp = svc.call(ToolRequest::from_parts("mock/echo", serde_json::json!({}))).await;
+        assert!(resp.is_ok());
     }
 }

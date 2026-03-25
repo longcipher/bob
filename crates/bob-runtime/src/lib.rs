@@ -113,6 +113,10 @@ use bob_core::{
 };
 pub use session::{Agent, AgentBuilder, AgentResponse, Session};
 pub use tooling::{NoOpToolPort, TimeoutToolLayer, ToolLayer};
+pub use tower_service::{
+    LlmPortServiceExt, LlmRequestWrapper, LlmResponseWrapper, LlmService, ServiceExt,
+    ToolListRequest, ToolListService, ToolPortServiceExt, ToolRequest, ToolResponse, ToolService,
+};
 pub use typestate::{
     AgentRunner, AgentStepResult, AwaitingToolCall, Finished, Ready, RunnerContext,
 };

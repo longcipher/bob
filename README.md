@@ -7,269 +7,173 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.md)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org/)
 
-![bob](https://socialify.git.ci/longcipher/bob/image?font=Source+Code+Pro&language=1&name=1&owner=1&pattern=Circuit+Board&theme=Auto)
+**Bob** is a minimal AI agent framework built in Rust with a hexagonal (ports & adapters) architecture. It connects to language models via [`genai`](https://crates.io/crates/genai) and to external tools via MCP servers using [`rmcp`](https://crates.io/crates/rmcp).
 
-**Bob** is a minimal AI agent framework built in Rust with a hexagonal (ports & adapters) architecture. It connects to language models via the [`genai`](https://crates.io/crates/genai) crate and to external tools via [MCP](https://modelcontextprotocol.io/) servers using [`rmcp`](https://crates.io/crates/rmcp).
+## Design Philosophy
+
+Bob prioritizes **extreme developer experience (DX)** and **compile-time safety**:
+
+- **Zero custom macros**: All abstractions use native Rust generics and traits
+- **Type-driven design**: TypeState patterns enforce valid state transitions at compile time
+- **Hexagonal purity**: `bob-runtime` NEVER imports `bob-adapters`; `bob-core` has ZERO internal dependencies
+- **Tower ecosystem**: Middleware composition via `tower::Service` instead of custom chains
+- **Extension traits**: Blanket implementations provide fluent APIs without inheritance
+
+```text
+Compile-Time Safety
+├── TypeState Builder:  Incomplete → Described → Complete
+├── TypedToolAdapter:   Input/Output types bound at compile time
+├── Extension Traits:   ToolPortExt.chain().with_timeout()
+└── Service Composition: tower::Service + tower middleware
+```
 
 ## Features
 
-- 🤖 **Multi-Model Support**: Works with OpenAI, Anthropic, Google, Groq, and more
-- 🔧 **Tool Integration**: Connect to MCP servers for file operations, shell commands, and custom tools
+- 🤖 **Multi-Model Support**: OpenAI, Anthropic, Google, Groq, and more
+- 🔧 **Tool Integration**: MCP servers for filesystem, shell, and custom tools
 - 🎯 **Skill System**: Load and apply predefined skills for specialized tasks
-- 👥 **Subagent Support**: Spawn independent background agents for parallel task execution
-- 💬 **Interactive REPL**: Chat through `AgentLoop` with slash commands like `/tools`, `/usage`, `/tape.info`, and `/handoff`
-- 🚌 **Message Bus**: Typed channel decoupling between chat adapters and agent runtime
-- 📓 **Activity Journal**: Append-only NDJSON log with natural language time queries
-- 🔒 **Access Control**: Per-channel sender allowlists for secure multi-user deployments
-- 🔄 **Streaming Responses**: Real-time streaming of LLM responses
-- 📊 **Observability**: Built-in tracing plus fanout-ready event sinks for hooks
-- 🏗️ **Clean Architecture**: Hexagonal (ports & adapters) design for extensibility
+- 👥 **Subagent Support**: Spawn independent background agents
+- 💬 **Interactive REPL**: Slash commands (`/tools`, `/usage`, `/handoff`)
+- 🔄 **Streaming Responses**: Real-time LLM response streaming
+- 📊 **Observability**: Tracing + OpenTelemetry event sinks
 
 ## Crates
 
-This workspace contains the following crates:
+| Crate | Description |
+|-------|-------------|
+| **[bob-core](https://crates.io/crates/bob-core)** | Domain types, port traits (`LlmPort`, `ToolPort`, `SessionStore`, `EventSink`) |
+| **[bob-runtime](https://crates.io/crates/bob-runtime)** | Runtime orchestration: 6-state turn FSM, prompt builder, action parser |
+| **[bob-adapters](https://crates.io/crates/bob-adapters)** | Concrete implementations: genai LLM, MCP tools, file/memory stores, OpenTelemetry |
+| **[bob-chat](https://crates.io/crates/bob-chat)** | Chat channel types and streaming abstractions for multi-platform integration |
+| **[bob-skills](https://crates.io/crates/bob-skills)** | Skill loading, parsing, selection, and registry with frontmatter metadata |
+| **bob-cli** | CLI application with interactive REPL and skill management |
 
-| Crate | Description | Links |
-|-------|-------------|-------|
-| **[bob-core](https://crates.io/crates/bob-core)** | Core domain types and port traits | [![docs.rs](https://docs.rs/bob-core/badge.svg)](https://docs.rs/bob-core) |
-| **[bob-runtime](https://crates.io/crates/bob-runtime)** | Runtime orchestration layer | [![docs.rs](https://docs.rs/bob-runtime/badge.svg)](https://docs.rs/bob-runtime) |
-| **[bob-adapters](https://crates.io/crates/bob-adapters)** | Adapter implementations | [![docs.rs](https://docs.rs/bob-adapters/badge.svg)](https://docs.rs/bob-adapters) |
-| **[bob-chat](https://crates.io/crates/bob-chat)** | Chat channel types and streaming abstractions | [![docs.rs](https://docs.rs/bob-chat/badge.svg)](https://docs.rs/bob-chat) |
-| **bob-cli** | CLI application (package: `cli-agent`) | - |
+### bob-core
+
+Defines the hexagonal boundary with **zero concrete implementations** — only contracts.
+
+**Key patterns:**
+
+- **Port Traits**: `LlmPort`, `ToolPort`, `SessionStore`, `EventSink`
+- **TypeState Builder**: `TypedToolBuilder<S>` — `build()` only available in `Complete` state
+- **Typed Tool Adapter**: `TypedToolAdapter` with associated `Input`/`Output` types
+- **Extension Traits**: `ToolPortExt` for `.chain()`, `.with_timeout()`, `.filter()`
+
+```rust
+// Compile-time validation: build() only in Complete state
+let descriptor = TypedToolBuilder::new("search")
+    .with_description("Search the web")
+    .with_schema(json!({"type": "object"}))
+    .build();
+
+// Typed tool with associated types
+impl TypedToolAdapter for SearchTool {
+    type Input = SearchInput;
+    type Output = SearchOutput;
+    async fn execute(&self, input: Self::Input) -> Result<Self::Output, ToolError> { ... }
+}
+```
+
+### bob-runtime
+
+Orchestration layer with 6-state turn FSM: Start → BuildPrompt → LlmInfer → ParseAction → CallTool → Done.
+
+```rust
+// Tower service composition
+let service = tools.into_tool_service()
+    .with_timeout(Duration::from_secs(15))
+    .with_rate_limit(10, Duration::from_secs(1));
+
+// Type-safe runtime builder
+let runtime = TypedRuntimeBuilder::new()
+    .with_llm(llm)
+    .with_default_model("gpt-4o-mini")
+    .build();
+```
+
+### bob-skills
+
+Skill management system with deterministic selection and frontmatter metadata:
+
+- **Loader**: Parse `SKILL.md` files with YAML frontmatter
+- **Registry**: Store and query skills by name, tags, and compatibility
+- **Selector**: Choose skills based on context and token budget
+- **Compose**: Merge multiple skills into a single prompt
 
 ## Architecture
 
 ```text
-bin/cli-agent        — CLI composition root (config, AgentLoop REPL)
-crates/bob-core      — Domain types and port traits (LlmPort, ToolPort, SessionStore, EventSink)
-crates/bob-runtime   — Scheduler FSM, prompt builder, action parser, CompositeToolPort
-crates/bob-adapters  — Concrete adapter implementations (genai, rmcp, in-memory store, tracing)
-crates/bob-chat      — Chat channel types and streaming abstractions
-```
-
-```text
 ┌─────────────────────────────────────────────────────────────┐
 │                     CLI Agent (bin)                         │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              DefaultAgentRuntime                     │   │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │   │
-│  │  │Scheduler │→ │Prompt    │→ │Action Parser     │  │   │
-│  │  │  FSM     │  │Builder   │  │                  │  │   │
-│  │  └──────────┘  └──────────┘  └──────────────────┘  │   │
-│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │              DefaultAgentRuntime                    │    │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │    │
+│  │  │Scheduler │→ │Prompt    │→ │Action Parser     │   │    │
+│  │  │  FSM     │  │Builder   │  │                  │   │    │
+│  │  └──────────┘  └──────────┘  └──────────────────┘   │    │
+│  └─────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
             ↓ uses ports (traits) from bob-core
 ┌─────────────────────────────────────────────────────────────┐
 │                  Adapters (bob-adapters)                    │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │GenAI LLM │  │MCP Tools │  │In-Memory │  │ Tracing  │   │
-│  │          │  │          │  │  Store   │  │  Events  │   │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
+│  │GenAI LLM │  │MCP Tools │  │In-Memory │  │ Tracing  │     │
+│  │          │  │          │  │  Store   │  │  Events  │     │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### System Flow
-
-```text
-  User (CLI / Chat Adapter / Telegram / Discord / Slack)
-         │
-         │ ChatEvent
-         v
-  +--------------+
-  │  ChatBot     │  Normalises events into InboundMessage.
-  │  (Adapters)  │  Applies per-channel allow_from whitelist.
-  │              │  Discards unknown senders silently.
-  +--------------+
-         │
-         │ InboundMessage pushed onto MessageBus (tokio mpsc)
-         v
-  +--------------+
-  │  AgentLoop   │  Session identified by channel + chat_id.
-  │  (Routing)   │  Slash commands handled deterministically.
-  │              │  Natural language forwarded to runtime.
-  +--------------+
-         │
-         │ AgentRequest
-         v
-  +-----------------+
-  │ AgentRuntime    │  6-state turn FSM:
-  │ (Scheduler)     │  Start → BuildPrompt → LlmInfer →
-  │                 │  ParseAction → CallTool → Done
-  +-----------------+
-         │
-         │ LLMRequest
-         v
-  +-----------------+
-  │ Provider Router │  Routes to active provider (genai).
-  +-----------------+
-         │
-         │ LLMResponse: text (final) or ToolCall list
-         v
-  +--------------+
-  │ Tool Loop    │  Executes via ToolRegistry.
-  │              │  Subagent spawn / MCP / builtin tools.
-  +--------------+
-         │
-         │ OutboundMessage via MessageBus
-         v
-  User receives response
-```
-
-### Subagent Architecture
-
-```text
-  Primary Agent (AgentRuntime)
-  │
-  ├── LLM returns tool_call: subagent/spawn
-  │        │
-  │        v
-  ├── SubagentPort.spawn()
-  │        │
-  │        │  tokio::spawn (independent task)
-  │        v
-  │   ┌─────────────────────┐
-  │   │ Subagent Instance   │
-  │   │ • Own session state  │
-  │   │ • Own tool registry  │
-  │   │ • Shared LLM port   │
-  │   │ • deny: subagent/*  │  ← prevents recursive spawning
-  │   │ • deny: message/*   │  ← prevents message loops
-  │   └────────┬────────────┘
-  │            │
-  │   oneshot::Sender → SubagentResult
-  │            │
-  │            v
-  │   ToolResult delivered back to parent
-  │
-  Primary continues or awaits result
-```
-
-### Crate Dependency Graph
-
-```text
-  bin/cli-agent (composition root)
-       │
-       ├── wires ──→ bob-runtime
-       │                 │
-       │                 └── depends only on ──→ bob-core
-       │
-       └── wires ──→ bob-adapters
-                         │
-                         └── depends only on ──→ bob-core
-
-  bob-chat ──→ bob-core (channel abstraction layer)
-
-  Dependency rule: bob-runtime NEVER imports bob-adapters.
-  bob-core has ZERO internal workspace dependencies.
-```
-
-See [docs/design.md](docs/design.md) for the full design document.
+**Dependency rule**: `bob-runtime` NEVER imports `bob-adapters`. `bob-core` has ZERO internal workspace dependencies.
 
 ## Quick Start
 
-### Prerequisites
-
-```bash
-# Install Rust (stable)
-rustup install stable
-
-# Install dev tools
-just setup
-```
-
 ### Installation
 
-#### From Source
-
 ```bash
-# Clone the repository
-git clone https://github.com/longcipher/bob.git
-cd bob
-
-# Build
+# From source
+git clone https://github.com/longcipher/bob.git && cd bob
 cargo build --release
-
-# Run
 cargo run --release --bin bob-cli -- --config agent.toml
-```
 
-#### Using Cargo
-
-```bash
-# Install the CLI binary
+# Or install directly
 cargo install --git https://github.com/longcipher/bob --package cli-agent --bin bob-cli
-
-# Run
-bob-cli --config agent.toml
 ```
 
 ### Configuration
 
-Create an `agent.toml` in the project root:
+Create `agent.toml`:
 
 ```toml
 [runtime]
 default_model = "openai:gpt-4o-mini"
 max_steps = 12
 turn_timeout_ms = 90000
-dispatch_mode = "native_preferred"
-model_context_tokens = 128000
 
-# Optional: Configure MCP tool servers
+# MCP tool servers
 [mcp]
 [[mcp.servers]]
 id = "filesystem"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-tool_timeout_ms = 15000
 
-# Optional: Configure skills
+# Skill sources
 [skills]
 max_selected = 3
-token_budget_ratio = 0.1
-
 [[skills.sources]]
 type = "directory"
 path = "./skills"
-recursive = false
 
-# Optional: Persist session state/checkpoints/artifacts across restarts
+# Session persistence
 [store]
 path = "./.bob/sessions"
-
-# Optional: Configure policies
-[policy]
-deny_tools = ["local/shell_exec"]
-allow_tools = ["local/read_file", "local/write_file"]
-default_deny = false
-
-# Optional: Configure approval guardrails
-[approval]
-mode = "allow_all"
-deny_tools = ["local/shell_exec"]
-
-# Optional: Configure per-session token budget
-[cost]
-session_token_budget = 10000
 ```
-
-When `[store]` is configured, Bob persists session snapshots, checkpoints,
-artifacts, and cost-meter usage counters to disk. Corrupted snapshots are
-quarantined (`*.corrupt.*`) and ignored so startup remains resilient.
 
 ### Environment Variables
 
-Set your LLM provider API key:
-
 ```bash
-# For OpenAI
-export OPENAI_API_KEY="sk-..."
-
-# For Anthropic
-export ANTHROPIC_API_KEY="sk-ant-..."
-
-# For Google
-export GEMINI_API_KEY="..."
+export OPENAI_API_KEY="sk-..."      # OpenAI
+export ANTHROPIC_API_KEY="sk-ant-..." # Anthropic
+export GEMINI_API_KEY="..."          # Google
 ```
 
 ### Run
@@ -278,192 +182,73 @@ export GEMINI_API_KEY="..."
 cargo run --bin bob-cli -- --config agent.toml
 ```
 
-The REPL prints `>` when ready. Type a message and press Enter. Use `/help` to inspect commands, `/usage` to inspect cumulative session tokens, and `/quit` to exit.
+## CLI Usage
 
-### Example Session
+### Global Options
 
-```text
-> Summarize docs/design.md in 5 bullets
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--config` | `-c` | `agent.toml` | Path to configuration file |
 
-I'll read docs/design.md and summarize it...
+### Subcommands
 
-[uses filesystem tool to read the document]
+#### `repl` — Interactive REPL
 
-Key points from docs/design.md:
-- Framework follows strict ports-and-adapters boundaries
-- Runtime orchestrates turn FSM and policies
-- Adapters isolate provider/tool integrations
-- ...
-
-> Translate those bullets to Chinese
-
-[agent generates translated output]
-
-已翻译如下：
-- 框架遵循严格的端口与适配器边界
-- Runtime 负责回合状态机与策略控制
-- ...
+```bash
+bob-cli repl
 ```
 
-## Supported LLM Providers
+**REPL Commands:**
 
-Bob supports all providers available through [`genai`](https://crates.io/crates/genai):
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `/help` | `/h` | Show available commands |
+| `/new` | `/reset` | Start new session |
+| `/quit` | `/q` | Exit REPL |
+| `/tools` | — | List available tools |
+| `/tool <name>` | — | Describe a specific tool |
+| `/tape search <query>` | — | Search tape history |
+| `/tape info` | — | Show tape statistics |
+| `/handoff [name] | — | Create handoff checkpoint |
+| `/usage` | — | Show token usage |
 
-| Provider | Model Examples | Configuration |
-|----------|---------------|---------------|
-| **OpenAI** | `gpt-4o`, `gpt-4o-mini` | Set `OPENAI_API_KEY` |
-| **Anthropic** | `claude-3-5-sonnet-20241022` | Set `ANTHROPIC_API_KEY` |
-| **Google** | `gemini-2.0-flash-exp` | Set `GEMINI_API_KEY` |
-| **Groq** | `llama-3.3-70b-versatile` | Set `GROQ_API_KEY` |
-| **Cohere** | `command-r-plus` | Set `COHERE_API_KEY` |
+#### `skills` — Skill Management
 
-## MCP Tools
+```bash
+# List skills
+bob-cli skills list ./skills --recursive --check
 
-Bob integrates with [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers:
+# Validate a skill
+bob-cli skills validate ./my-skill
 
-### Official MCP Servers
+# Read properties (json/yaml/toml)
+bob-cli skills read-properties ./my-skill --format yaml
 
-- **Filesystem**: `@modelcontextprotocol/server-filesystem`
-- **GitHub**: `@modelcontextprotocol/server-github`
-- **PostgreSQL**: `@modelcontextprotocol/server-postgres`
-- **Slack**: `@modelcontextprotocol/server-slack`
+# Generate XML prompt block
+bob-cli skills to-prompt ./skill1 ./skill2
+```
 
-### Custom MCP Servers
+**`skills list` Options:**
 
-You can build custom MCP servers in any language that supports the protocol.
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--recursive` | `-r` | Search subdirectories |
+| `--check` | `-c` | Validate each skill |
+| `--failed` | `-f` | Show only invalid skills |
+| `--long` | `-l` | Show full details |
+| `--paths` | `-p` | Show only paths |
+| `--names` | `-n` | Show only names |
+| `--json` | — | Output as JSON |
 
 ## Development
 
-### Development Commands
-
 ```bash
-# Format code
-just format
-
-# Run lints (typos, clippy, machete, etc.)
-just lint
-
-# Run all tests
-just test
-
-# Full CI check (lint + test + build)
-just ci
+just format    # Format code
+just lint      # Run lints
+just test      # Run tests
+just ci        # Full CI check
 ```
-
-### Project Structure
-
-```text
-.
-├── bin/
-│   └── cli-agent/          # CLI package (binary: bob-cli)
-├── crates/
-│   ├── bob-core/           # Domain types and ports
-│   ├── bob-runtime/        # Runtime orchestration
-│   ├── bob-adapters/       # Adapter implementations
-│   └── bob-chat/           # Chat channel types and streaming abstractions
-├── docs/
-│   └── design.md           # Architecture design
-├── specs/                  # Task specifications
-└── .opencode/              # AI development skills
-```
-
-## Workspace Configuration
-
-### Linting Philosophy
-
-The workspace uses strict clippy lints with the following principles:
-
-1. **Pedantic by default**: Enable all pedantic lints, then allow specific ones that are too noisy
-2. **Panic safety**: Deny `unwrap`, `expect`, and `panic` — use proper error handling
-3. **No debug code**: Deny `dbg!`, `todo!`, and `unimplemented!`
-4. **No stdout in libraries**: Use `tracing` instead of `println!`/`eprintln!`
-
-### Adding Dependencies
-
-Always use `cargo add`:
-
-```bash
-# Add to workspace
-cargo add <crate> --workspace
-
-# Add to specific crate
-cargo add <crate> -p <crate-name>
-```
-
-## Publishing
-
-### Publishing to crates.io
-
-Each library crate can be published independently:
-
-```bash
-# Publish bob-core
-cargo publish -p bob-core
-
-# Publish bob-runtime
-cargo publish -p bob-runtime
-
-# Publish bob-adapters
-cargo publish -p bob-adapters
-
-# Publish bob-chat
-cargo publish -p bob-chat
-```
-
-### Documentation
-
-Documentation is automatically generated on [docs.rs](https://docs.rs) when published to crates.io:
-
-- [bob-core docs](https://docs.rs/bob-core)
-- [bob-runtime docs](https://docs.rs/bob-runtime)
-- [bob-adapters docs](https://docs.rs/bob-adapters)
-- [bob-chat docs](https://docs.rs/bob-chat)
-
-## Contributing
-
-Contributions are welcome! Please read our contributing guidelines before submitting PRs.
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run `just ci` to ensure all checks pass
-5. Submit a pull request
-
-## Roadmap
-
-- [x] Multi-model LLM support via genai
-- [x] MCP tool integration via rmcp
-- [x] Skill system with deterministic selection
-- [x] Interactive REPL with slash commands
-- [x] Streaming responses
-- [x] Session persistence (memory + file)
-- [x] Observability (tracing + OpenTelemetry)
-- [ ] Subagent spawning and management
-- [ ] Message bus decoupling (bot ↔ agent)
-- [ ] Activity journal with natural language queries
-- [ ] Access control (per-channel allowlists)
-- [ ] System monitor (filesystem watcher)
-- [ ] Cron scheduling (interval / at / cron expressions)
-- [ ] Persistent session storage (SQLite, PostgreSQL)
-- [ ] Web UI for agent interaction
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE.md](LICENSE.md) for details.
-
-## Acknowledgments
-
-- [genai](https://crates.io/crates/genai) - Unified LLM API
-- [rmcp](https://crates.io/crates/rmcp) - MCP client implementation
-- [agent-skills](https://crates.io/crates/agent-skills) - Skill system
-- [Model Context Protocol](https://modelcontextprotocol.io/) - Tool integration protocol
-
-## Support
-
-- **Documentation**: [docs.rs](https://docs.rs/bob-core)
-- **Issues**: [GitHub Issues](https://github.com/longcipher/bob/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/longcipher/bob/discussions)
-
----
-
-**Note**: This project is in active development. APIs may change between versions.
+Apache-2.0. See [LICENSE.md](LICENSE.md).
