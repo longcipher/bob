@@ -21,9 +21,9 @@ bob-adapters = { path = "crates/bob-adapters", version = "0.2.2" }
 bob-chat = { path = "crates/bob-chat", version = "0.2.2" }
 bob-core = { path = "crates/bob-core", version = "0.2.2" }
 bob-runtime = { path = "crates/bob-runtime", version = "0.2.2" }
+bob-skills = { path = "crates/bob-skills", version = "0.2.2" }
 
 # external crates
-agent-skills = "0.2.0"
 async-stream = "0.3.6"
 async-trait = "0.1.89"
 bytes = "1.11.1"

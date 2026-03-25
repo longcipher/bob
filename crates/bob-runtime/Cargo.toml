@@ -18,7 +18,6 @@ bob-core = { workspace = true }
 flume = { workspace = true }
 futures-util = { workspace = true }
 jsonschema = "0.45.0"
-scc = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }

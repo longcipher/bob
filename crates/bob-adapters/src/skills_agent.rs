@@ -5,7 +5,7 @@
 //! ## Overview
 //!
 //! This module provides skill loading and composition capabilities using the
-//! [`agent-skills`](https://crates.io/crates/agent-skills) crate.
+//! [`bob-skills`](https://crates.io/crates/bob-skills) crate.
 //!
 //! Skills are predefined prompts and instructions that can be dynamically
 //! selected and injected into the conversation based on the user's input.
@@ -122,12 +122,11 @@ pub fn load_skills_from_sources(
 
     let mut loaded = Vec::with_capacity(dirs.len());
     for dir in dirs {
-        let skill_dir = agent_skills::SkillDirectory::load(&dir).map_err(|err| {
-            SkillsAgentError::LoadSkill {
+        let skill_dir =
+            bob_skills::SkillDirectory::load(&dir).map_err(|err| SkillsAgentError::LoadSkill {
                 path: dir.display().to_string(),
                 message: err.to_string(),
-            }
-        })?;
+            })?;
 
         let skill = skill_dir.skill();
         let tags = skill

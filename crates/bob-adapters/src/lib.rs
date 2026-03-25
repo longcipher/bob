@@ -18,7 +18,7 @@
 //! - **`llm-genai`** (default): LLM adapter using the [`genai`](https://crates.io/crates/genai)
 //!   crate
 //! - **`mcp-rmcp`** (default): Tool adapter for MCP servers via [`rmcp`](https://crates.io/crates/rmcp)
-//! - **`skills-agent`** (default): Skill loading and composition via [`agent-skills`](https://crates.io/crates/agent-skills)
+//! - **`skills-agent`** (default): Skill loading and composition via [`bob-skills`](https://crates.io/crates/bob-skills)
 //! - **`store-memory`** (default): In-memory session storage
 //! - **`observe-tracing`** (default): Event sink using [`tracing`](https://crates.io/crates/tracing)
 //!

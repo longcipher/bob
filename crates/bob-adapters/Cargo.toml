@@ -29,7 +29,7 @@ observe-otel = [
     "dep:opentelemetry_sdk",
 ]
 observe-tracing = ["dep:tracing"]
-skills-agent = ["dep:agent-skills"]
+skills-agent = ["dep:bob-skills"]
 store-memory = []
 
 [dependencies]
@@ -42,7 +42,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["process", "io-util"] }
 
 # Feature-gated
-agent-skills = { workspace = true, optional = true }
+bob-skills = { workspace = true, optional = true }
 genai = { workspace = true, optional = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
