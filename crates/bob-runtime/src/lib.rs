@@ -81,6 +81,7 @@
 
 pub mod action;
 pub mod agent_loop;
+pub mod classifier;
 pub mod composite;
 pub mod message_bus;
 pub mod output_validation;

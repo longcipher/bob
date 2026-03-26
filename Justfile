@@ -23,7 +23,7 @@ lint:
 
 # Run tests with cargo-nextest (falls back to cargo test if nextest is not installed)
 test:
-  cargo nextest run --all-features 2>/dev/null || cargo test --all-features
+  cargo nextest run --all-features
 
 # Run tests with coverage
 test-coverage:

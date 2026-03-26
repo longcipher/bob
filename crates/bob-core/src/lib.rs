@@ -69,6 +69,7 @@
 
 pub mod channel;
 pub mod character;
+pub mod context_trimmer;
 pub mod error;
 pub mod error_classifier;
 pub mod instrumenter;

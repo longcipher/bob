@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/longcipher/bob"
@@ -17,11 +17,11 @@ resolver = "3"
 
 [workspace.dependencies]
 # internal crates
-bob-adapters = { path = "crates/bob-adapters", version = "0.2.2" }
-bob-chat = { path = "crates/bob-chat", version = "0.2.2" }
-bob-core = { path = "crates/bob-core", version = "0.2.2" }
-bob-runtime = { path = "crates/bob-runtime", version = "0.2.2" }
-bob-skills = { path = "crates/bob-skills", version = "0.2.2" }
+bob-adapters = { path = "crates/bob-adapters", version = "0.3.0" }
+bob-chat = { path = "crates/bob-chat", version = "0.3.0" }
+bob-core = { path = "crates/bob-core", version = "0.3.0" }
+bob-runtime = { path = "crates/bob-runtime", version = "0.3.0" }
+bob-skills = { path = "crates/bob-skills", version = "0.3.0" }
 
 # external crates
 async-stream = "0.3.6"

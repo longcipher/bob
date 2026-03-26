@@ -7,6 +7,22 @@
 //! - **Distributed suspend/resume**: serialize state between steps
 //! - **Compile-time safety**: invalid state transitions are rejected at build time
 //!
+//! ## State Machine
+//!
+//! ```text
+//! Ready ──infer()──▶ AwaitingToolCall
+//!   │                     │
+//!   │                     ├──provide_tool_results()──▶ Ready
+//!   │                     │
+//!   │                     └──require_approval()──▶ AwaitingApproval
+//!   │                                                  │
+//!   │                                                  ├──approve()──▶ AwaitingToolCall
+//!   │                                                  │
+//!   │                                                  └──deny()──▶ Finished
+//!   │
+//!   └──infer()──▶ Finished (when no tool calls)
+//! ```
+//!
 //! ## Example
 //!
 //! ```rust,ignore
@@ -45,10 +61,19 @@ use bob_core::{
 // ── State Markers ────────────────────────────────────────────────────
 
 /// Agent is ready to perform LLM inference.
+///
+/// This is the initial state and the state after tool results are provided.
+/// Only valid transitions: `infer()` → `AwaitingToolCall` or `Finished`.
 #[derive(Debug)]
 pub struct Ready;
 
-/// Agent is waiting for tool call results before continuing.
+/// Agent has requested tool calls and is waiting for results.
+///
+/// This state holds the pending tool calls that need to be executed.
+/// Valid transitions:
+/// - `provide_tool_results()` → `Ready` (continue execution)
+/// - `require_approval()` → `AwaitingApproval` (human-in-the-loop)
+/// - `cancel()` → `Finished` (abort execution)
 #[derive(Debug)]
 pub struct AwaitingToolCall {
     /// Pending tool calls requested by the LLM.
@@ -57,7 +82,29 @@ pub struct AwaitingToolCall {
     pub call_ids: Vec<Option<String>>,
 }
 
+/// Agent is waiting for human approval before executing tool calls.
+///
+/// This state is entered when `require_approval()` is called on
+/// `AwaitingToolCall`. It provides compile-time safety by preventing
+/// direct tool execution without explicit approval.
+///
+/// Valid transitions:
+/// - `approve()` → `AwaitingToolCall` (proceed with execution)
+/// - `deny()` → `Finished` (abort with reason)
+#[derive(Debug)]
+pub struct AwaitingApproval {
+    /// Pending tool calls awaiting approval.
+    pub pending_calls: Vec<ToolCall>,
+    /// Native tool call IDs.
+    pub call_ids: Vec<Option<String>>,
+    /// Reason for requiring approval (for audit trail).
+    pub reason: String,
+}
+
 /// Agent has finished execution with a final response.
+///
+/// Terminal state — no further transitions are possible.
+/// Access the final response via `response()` or `into_response()`.
 #[derive(Debug)]
 pub struct Finished {
     /// The final agent response.
@@ -296,6 +343,81 @@ impl AgentRunner<AwaitingToolCall> {
     /// Cancel the pending tool calls and transition to `Finished`.
     #[must_use]
     pub fn cancel(self, reason: impl Into<String>) -> AgentRunner<Finished> {
+        AgentRunner {
+            state: Finished {
+                response: AgentResponse {
+                    content: reason.into(),
+                    tool_transcript: self.context.tool_transcript.clone(),
+                    usage: self.context.total_usage.clone(),
+                    finish_reason: FinishReason::Cancelled,
+                },
+            },
+            session: self.session,
+            context: self.context,
+        }
+    }
+
+    /// Require human approval before executing tool calls.
+    ///
+    /// Transitions to `AwaitingApproval` state, which prevents
+    /// direct tool execution. Callers must explicitly `approve()`
+    /// or `deny()` to proceed.
+    ///
+    /// This provides compile-time safety: `AwaitingToolCall` can
+    /// directly execute tools via `provide_tool_results()`, but
+    /// `AwaitingApproval` cannot — it must go through the approval
+    /// gate first.
+    #[must_use]
+    pub fn require_approval(self, reason: impl Into<String>) -> AgentRunner<AwaitingApproval> {
+        AgentRunner {
+            state: AwaitingApproval {
+                pending_calls: self.state.pending_calls,
+                call_ids: self.state.call_ids,
+                reason: reason.into(),
+            },
+            session: self.session,
+            context: self.context,
+        }
+    }
+}
+
+// ── AwaitingApproval State ───────────────────────────────────────────
+
+impl AgentRunner<AwaitingApproval> {
+    /// Get the pending tool calls awaiting approval.
+    #[must_use]
+    pub fn pending_calls(&self) -> &[ToolCall] {
+        &self.state.pending_calls
+    }
+
+    /// Get the reason approval was required.
+    #[must_use]
+    pub fn approval_reason(&self) -> &str {
+        &self.state.reason
+    }
+
+    /// Approve the tool calls and transition back to `AwaitingToolCall`.
+    ///
+    /// After approval, call `provide_tool_results()` with the execution
+    /// results to continue the agent loop.
+    #[must_use]
+    pub fn approve(self) -> AgentRunner<AwaitingToolCall> {
+        AgentRunner {
+            state: AwaitingToolCall {
+                pending_calls: self.state.pending_calls,
+                call_ids: self.state.call_ids,
+            },
+            session: self.session,
+            context: self.context,
+        }
+    }
+
+    /// Deny the tool calls and transition to `Finished`.
+    ///
+    /// The provided reason will be included in the final response
+    /// for the user/audit trail.
+    #[must_use]
+    pub fn deny(self, reason: impl Into<String>) -> AgentRunner<Finished> {
         AgentRunner {
             state: Finished {
                 response: AgentResponse {

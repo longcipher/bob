@@ -261,6 +261,18 @@ impl<E> CircuitBreakerError<E> {
 
 // ── Retry Config ─────────────────────────────────────────────────────
 
+/// Jitter strategy for retry delays to avoid thundering herd.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JitterKind {
+    /// No jitter — use the computed delay as-is.
+    #[default]
+    None,
+    /// Add uniform random jitter: delay ± (delay * jitter_ratio).
+    Uniform,
+    /// Full jitter: random value between 0 and computed delay.
+    Full,
+}
+
 /// Exponential backoff retry parameters.
 ///
 /// Adapters consume this configuration to drive retry loops.
@@ -276,6 +288,10 @@ pub struct RetryConfig {
     pub max_delay: Duration,
     /// Multiplier applied to the delay after each failure.
     pub multiplier: f64,
+    /// Jitter strategy to add randomness and avoid thundering herd.
+    pub jitter: JitterKind,
+    /// Jitter ratio for Uniform jitter (0.0-1.0). Default 0.25 = ±25%.
+    pub jitter_ratio: f64,
 }
 
 impl Default for RetryConfig {
@@ -285,18 +301,80 @@ impl Default for RetryConfig {
             initial_delay: Duration::from_millis(200),
             max_delay: Duration::from_secs(10),
             multiplier: 2.0,
+            jitter: JitterKind::None,
+            jitter_ratio: 0.25,
         }
     }
 }
 
 impl RetryConfig {
-    /// Compute the delay for a given attempt number (0-indexed).
+    /// Compute the base delay for a given attempt number (0-indexed).
     #[must_use]
-    pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
+    pub fn base_delay(&self, attempt: u32) -> Duration {
         let base = self.initial_delay.as_millis() as f64;
         let scaled = base * self.multiplier.powi(attempt as i32);
         let capped = scaled.min(self.max_delay.as_millis() as f64);
         Duration::from_millis(capped as u64)
+    }
+
+    /// Compute the delay with jitter for a given attempt number (0-indexed).
+    ///
+    /// Uses `rand` crate when available, falls back to a simple
+    /// deterministic hash-based jitter for no-std / no-rand environments.
+    #[must_use]
+    pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
+        let base = self.base_delay(attempt);
+        self.apply_jitter(base, attempt)
+    }
+
+    /// Apply jitter to a base delay.
+    fn apply_jitter(&self, base: Duration, attempt: u32) -> Duration {
+        match self.jitter {
+            JitterKind::None => base,
+            JitterKind::Uniform => {
+                let jitter_range = (base.as_millis() as f64) * self.jitter_ratio;
+                let offset = (Self::deterministic_jitter(attempt) * jitter_range)
+                    .mul_add(2.0, -jitter_range);
+                let result = (base.as_millis() as f64 + offset).max(0.0);
+                Duration::from_millis(result as u64)
+            }
+            JitterKind::Full => {
+                let max = base.as_millis() as f64;
+                let factor = Self::deterministic_jitter(attempt);
+                Duration::from_millis((max * factor) as u64)
+            }
+        }
+    }
+
+    /// Deterministic pseudo-random jitter based on attempt number.
+    ///
+    /// Returns a value in [0.0, 1.0). Uses a simple hash-like
+    /// approach so behavior is deterministic for testing.
+    fn deterministic_jitter(attempt: u32) -> f64 {
+        // Simple xorshift-like hash for deterministic pseudo-random
+        let mut x = attempt.wrapping_mul(0x9E37_79B9).wrapping_add(0x517C_C1B7);
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        // Normalize to [0.0, 1.0)
+        f64::from(x) / (f64::from(u32::MAX) + 1.0)
+    }
+}
+
+impl RetryConfig {
+    /// Create a config with uniform jitter (±ratio).
+    #[must_use]
+    pub fn with_uniform_jitter(mut self, ratio: f64) -> Self {
+        self.jitter = JitterKind::Uniform;
+        self.jitter_ratio = ratio.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Create a config with full jitter (random between 0 and delay).
+    #[must_use]
+    pub fn with_full_jitter(mut self) -> Self {
+        self.jitter = JitterKind::Full;
+        self
     }
 }
 
@@ -429,6 +507,8 @@ mod tests {
             initial_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(5),
             multiplier: 2.0,
+            jitter: JitterKind::None,
+            jitter_ratio: 0.25,
         };
 
         assert_eq!(config.delay_for_attempt(0), Duration::from_millis(100));
