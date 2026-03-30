@@ -45,9 +45,13 @@ tokio = { workspace = true, features = ["process", "io-util"] }
 
 # Feature-gated
 bob-skills = { workspace = true, optional = true }
-liter-llm = { workspace = true, optional = true }
+liter-llm = { workspace = true, optional = true, features = [
+    "native-http",
+] }
 opentelemetry = { workspace = true, optional = true }
-opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, features = [
+    "grpc-tonic",
+], optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 rmcp = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
