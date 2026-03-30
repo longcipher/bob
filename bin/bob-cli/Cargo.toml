@@ -23,7 +23,7 @@ bob-skills = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 config = { workspace = true }
 eyre = { workspace = true }
-genai = { workspace = true }
+liter-llm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_yml = { workspace = true }

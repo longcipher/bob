@@ -7,14 +7,14 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 description = "Adapter implementations for Bob Agent Framework ports"
-keywords = ["agent", "ai", "adapter", "genai", "mcp"]
+keywords = ["agent", "ai", "adapter", "llm", "mcp"]
 categories = ["development-tools", "asynchronous", "api-bindings"]
 readme = "README.md"
 documentation = "https://docs.rs/bob-adapters"
 
 [features]
-default = ["llm-genai", "mcp-rmcp", "skills-agent", "observe-tracing"]
-llm-genai = ["dep:genai"]
+default = ["llm-liter", "mcp-rmcp", "skills-agent", "observe-tracing"]
+llm-liter = ["dep:liter-llm"]
 mcp-rmcp = [
     "dep:rmcp",
     "rmcp/client",
@@ -45,7 +45,7 @@ tokio = { workspace = true, features = ["process", "io-util"] }
 
 # Feature-gated
 bob-skills = { workspace = true, optional = true }
-genai = { workspace = true, optional = true }
+liter-llm = { workspace = true, optional = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }

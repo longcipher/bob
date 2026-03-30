@@ -46,9 +46,17 @@ pub(crate) struct CliRuntimeHandles {
 
 /// Build the runtime from a loaded config.
 pub(crate) async fn build_runtime(cfg: &AgentConfig) -> eyre::Result<CliRuntimeHandles> {
-    let client = genai::Client::default();
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+        .or_else(|_| std::env::var("GEMINI_API_KEY"))
+        .unwrap_or_default();
+    let config = liter_llm::ClientConfig::new(api_key);
+    let client = std::sync::Arc::new(
+        liter_llm::DefaultClient::new(config, Some(&cfg.runtime.default_model))
+            .wrap_err("failed to create LLM client")?,
+    );
     let llm: Arc<dyn bob_adapters::core::ports::LlmPort> =
-        Arc::new(bob_adapters::llm_genai::GenAiLlmAdapter::new(client));
+        Arc::new(bob_adapters::llm_liter::LiterLlmAdapter::new(client));
 
     let tools = build_tool_port(cfg).await?;
     let store_root = resolve_store_root(cfg)?;

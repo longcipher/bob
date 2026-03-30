@@ -33,8 +33,10 @@ eyre = "0.6.12"
 flume = "0.12.0"
 futures-core = "0.3.32"
 futures-util = "0.3.32"
-genai = "=0.6.0-beta.10"
 jsonschema = "0.45.0"
+liter-llm = { version = "1.1.1", default-features = false, features = [
+    "native-http",
+] }
 opentelemetry = "0.31.0"
 opentelemetry-otlp = { version = "0.31.1", features = ["grpc-tonic"] }
 opentelemetry_sdk = "0.31.0"

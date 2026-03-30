@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.md)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org/)
 
-**Bob** is a minimal AI agent framework built in Rust with a hexagonal (ports & adapters) architecture. It connects to language models via [`genai`](https://crates.io/crates/genai) and to external tools via MCP servers using [`rmcp`](https://crates.io/crates/rmcp).
+**Bob** is a minimal AI agent framework built in Rust with a hexagonal (ports & adapters) architecture. It connects to language models via [`liter-llm`](https://crates.io/crates/liter-llm) and to external tools via MCP servers using [`rmcp`](https://crates.io/crates/rmcp).
 
 ## Design Philosophy
 
@@ -43,7 +43,7 @@ Compile-Time Safety
 |-------|-------------|
 | **[bob-core](https://crates.io/crates/bob-core)** | Domain types, port traits (`LlmPort`, `ToolPort`, `SessionStore`, `EventSink`) |
 | **[bob-runtime](https://crates.io/crates/bob-runtime)** | Runtime orchestration: 6-state turn FSM, prompt builder, action parser |
-| **[bob-adapters](https://crates.io/crates/bob-adapters)** | Concrete implementations: genai LLM, MCP tools, file/memory stores, OpenTelemetry |
+| **[bob-adapters](https://crates.io/crates/bob-adapters)** | Concrete implementations: liter-llm, MCP tools, file/memory stores, OpenTelemetry |
 | **[bob-chat](https://crates.io/crates/bob-chat)** | Chat channel types and streaming abstractions for multi-platform integration |
 | **[bob-skills](https://crates.io/crates/bob-skills)** | Skill loading, parsing, selection, and registry with frontmatter metadata |
 | **bob-cli** | CLI application with interactive REPL and skill management |
@@ -117,7 +117,7 @@ Skill management system with deterministic selection and frontmatter metadata:
 ┌─────────────────────────────────────────────────────────────┐
 │                  Adapters (bob-adapters)                    │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
-│  │GenAI LLM │  │MCP Tools │  │In-Memory │  │ Tracing  │     │
+│  │LiterLLM  │  │MCP Tools │  │In-Memory │  │ Tracing  │     │
 │  │          │  │          │  │  Store   │  │  Events  │     │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘     │
 └─────────────────────────────────────────────────────────────┘

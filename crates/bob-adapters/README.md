@@ -21,7 +21,7 @@ Adapter implementations for the [Bob Agent Framework](https://github.com/longcip
 
 All adapters are feature-gated to minimize dependencies:
 
-- **`llm-genai`** (default): LLM adapter using the [`genai`](https://crates.io/crates/genai) crate
+- **`llm-liter`** (default): LLM adapter using the [`liter-llm`](https://crates.io/crates/liter-llm) crate
 - **`mcp-rmcp`** (default): Tool adapter for MCP servers via [`rmcp`](https://crates.io/crates/rmcp)
 - **`skills-agent`** (default): Skill loading and composition via [`agent-skills`](https://crates.io/crates/agent-skills)
 - **`store-memory`** (default): In-memory session storage
@@ -42,23 +42,25 @@ To disable default features and select specific adapters:
 [dependencies.bob-adapters]
 version = "0.2.1"
 default-features = false
-features = ["llm-genai", "mcp-rmcp"]
+features = ["llm-liter", "mcp-rmcp"]
 ```
 
 ### Example: Creating Adapters
 
 ```rust
 use bob_adapters::{
-    llm_genai::GenAiLlmAdapter,
+    llm_liter::LiterLlmAdapter,
     mcp_rmcp::McpToolAdapter,
     store_memory::InMemorySessionStore,
     observe::TracingEventSink,
 };
-use genai::Client;
+use liter_llm::{ClientConfig, DefaultClient, LlmClient};
+use std::sync::Arc;
 
 // LLM adapter
-let client = Client::default();
-let llm = GenAiLlmAdapter::new(client);
+let config = ClientConfig::new(std::env::var("OPENAI_API_KEY").unwrap_or_default());
+let client = Arc::new(DefaultClient::new(config, None).unwrap());
+let llm = LiterLlmAdapter::new(client);
 
 // Tool adapter (MCP server)
 let tools = McpToolAdapter::connect_stdio(
@@ -91,9 +93,9 @@ let rendered = composer.render_bundle_for_input("summarize this incident report"
 
 ## Adapters
 
-### LLM Adapters (`llm-genai`)
+### LLM Adapters (`llm-liter`)
 
-Connects to LLM providers through the `genai` crate, supporting:
+Connects to LLM providers through the `liter-llm` crate, supporting:
 
 - OpenAI (GPT-4, GPT-4o-mini, etc.)
 - Anthropic (Claude)

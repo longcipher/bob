@@ -2,7 +2,7 @@
 #
 # Copy this file to your project root and adjust as needed.
 # API keys (e.g. OPENAI_API_KEY) are read from environment variables
-# by the genai crate — they are NOT stored in this file.
+# by the liter-llm crate — they are NOT stored in this file.
 
 [runtime]
 # Model identifier in "provider:model" format.

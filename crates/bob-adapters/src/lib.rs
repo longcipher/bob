@@ -15,7 +15,7 @@
 //!
 //! All adapters are feature-gated to minimize dependencies:
 //!
-//! - **`llm-genai`** (default): LLM adapter using the [`genai`](https://crates.io/crates/genai)
+//! - **`llm-liter`** (default): LLM adapter using the [`liter-llm`](https://crates.io/crates/liter-llm)
 //!   crate
 //! - **`mcp-rmcp`** (default): Tool adapter for MCP servers via [`rmcp`](https://crates.io/crates/rmcp)
 //! - **`skills-agent`** (default): Skill loading and composition via [`bob-skills`](https://crates.io/crates/bob-skills)
@@ -26,16 +26,18 @@
 //!
 //! ```rust,ignore
 //! use bob_adapters::{
-//!     llm_genai::GenAiLlmAdapter,
+//!     llm_liter::LiterLlmAdapter,
 //!     mcp_rmcp::McpToolAdapter,
 //!     store_memory::InMemorySessionStore,
 //!     observe::TracingEventSink,
 //! };
-//! use genai::Client;
+//! use liter_llm::{ClientConfig, DefaultClient, LlmClient};
+//! use std::sync::Arc;
 //!
 //! // LLM adapter
-//! let client = Client::default();
-//! let llm = GenAiLlmAdapter::new(client);
+//! let config = ClientConfig::new(std::env::var("OPENAI_API_KEY").unwrap_or_default());
+//! let client = Arc::new(DefaultClient::new(config, None).unwrap());
+//! let llm = LiterLlmAdapter::new(client);
 //!
 //! // Tool adapter (MCP server)
 //! let tools = McpToolAdapter::connect_stdio(
@@ -54,9 +56,9 @@
 //!
 //! ## Adapters
 //!
-//! ### LLM Adapters (`llm-genai`)
+//! ### LLM Adapters (`llm-liter`)
 //!
-//! Connects to LLM providers through the `genai` crate, supporting:
+//! Connects to LLM providers through the `liter-llm` crate, supporting:
 //! - OpenAI (GPT-4, GPT-4o-mini, etc.)
 //! - Anthropic (Claude)
 //! - Google (Gemini)
@@ -101,8 +103,8 @@ pub mod journal_memory;
 pub mod openai_schema;
 pub mod tape_memory;
 
-#[cfg(feature = "llm-genai")]
-pub mod llm_genai;
+#[cfg(feature = "llm-liter")]
+pub mod llm_liter;
 
 #[cfg(feature = "mcp-rmcp")]
 pub mod mcp_rmcp;

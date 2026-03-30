@@ -152,7 +152,7 @@ Here is the translated explanation...
 
 ### Multi-Model Support
 
-Works with any LLM provider supported by `genai`:
+Works with any LLM provider supported by `liter-llm`:
 
 - OpenAI: `openai:gpt-4o`, `openai:gpt-4o-mini`
 - Anthropic: `anthropic:claude-3-5-sonnet-20241022`
