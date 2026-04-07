@@ -143,15 +143,26 @@ When you need external information, use the available tools.";
 const MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS: u32 = 3;
 
 fn resolve_system_instructions(req: &AgentRequest) -> String {
-    let Some(skills_prompt) = req.context.system_prompt.as_deref() else {
-        return DEFAULT_SYSTEM_INSTRUCTIONS.to_string();
-    };
-
-    if skills_prompt.trim().is_empty() {
-        DEFAULT_SYSTEM_INSTRUCTIONS.to_string()
+    if let Some(skills_prompt) = req.context.system_prompt.as_deref() {
+        if skills_prompt.trim().is_empty() {
+            DEFAULT_SYSTEM_INSTRUCTIONS.to_string()
+        } else {
+            format!("{DEFAULT_SYSTEM_INSTRUCTIONS}\n\n{skills_prompt}")
+        }
     } else {
-        format!("{DEFAULT_SYSTEM_INSTRUCTIONS}\n\n{skills_prompt}")
+        DEFAULT_SYSTEM_INSTRUCTIONS.to_string()
     }
+}
+
+fn resolve_system_instructions_with_memory(
+    req: &AgentRequest,
+    session: &bob_core::types::SessionState,
+) -> String {
+    let base_instructions = resolve_system_instructions(req);
+    crate::memory_context::inject_memory_prompt(
+        &base_instructions,
+        session.memory_summary.as_deref(),
+    )
 }
 
 fn resolve_selected_skills(req: &AgentRequest) -> Vec<String> {
@@ -412,11 +423,11 @@ pub(crate) async fn run_turn_with_extensions(
 ) -> Result<AgentRunResult, AgentError> {
     let model = req.model.as_deref().unwrap_or(default_model);
     let cancel_token = req.cancel_token.clone();
-    let system_instructions = resolve_system_instructions(&req);
     let selected_skills = resolve_selected_skills(&req);
     let tool_call_policy = resolve_tool_call_policy(&req);
 
     let mut session = store.load(&req.session_id).await?.unwrap_or_default();
+    let system_instructions = resolve_system_instructions_with_memory(&req, &session);
     let tool_descriptors = tools.list_tools().await?;
     let mut guard = LoopGuard::new(policy.clone());
 
@@ -935,11 +946,11 @@ async fn run_turn_stream_inner(
 ) -> Result<(), AgentError> {
     let model = req.model.as_deref().unwrap_or(&config.default_model);
     let cancel_token = req.cancel_token.clone();
-    let system_instructions = resolve_system_instructions(&req);
     let selected_skills = resolve_selected_skills(&req);
     let tool_call_policy = resolve_tool_call_policy(&req);
 
     let mut session = store.load(&req.session_id).await?.unwrap_or_default();
+    let system_instructions = resolve_system_instructions_with_memory(&req, &session);
     let tool_descriptors = tools.list_tools().await?;
     let mut guard = LoopGuard::new(config.policy.clone());
     let mut total_usage = TokenUsage::default();

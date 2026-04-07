@@ -395,6 +395,9 @@ pub enum Role {
 pub struct SessionState {
     /// Full message history.
     pub messages: Vec<Message>,
+    /// Rolling summary of conversation history for context compression.
+    #[serde(default)]
+    pub memory_summary: Option<String>,
     /// Cumulative token usage across turns.
     pub total_usage: TokenUsage,
     /// Monotonically increasing version for CAS operations.

@@ -83,6 +83,7 @@ pub mod action;
 pub mod agent_loop;
 pub mod classifier;
 pub mod composite;
+pub mod memory_context;
 pub mod message_bus;
 pub mod output_validation;
 pub mod progressive_tools;
