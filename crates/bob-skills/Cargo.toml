@@ -15,11 +15,11 @@ async-trait.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_yml = { workspace = true }
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

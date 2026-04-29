@@ -31,7 +31,7 @@ use bob_core::types::ToolDescriptor;
 /// Inactive tools appear only as compact name + description entries in the
 /// system prompt.
 #[derive(Debug)]
-pub struct ProgressiveToolView {
+pub(crate) struct ProgressiveToolView {
     /// All available tools (full descriptors).
     all_tools: Vec<ToolDescriptor>,
     /// Set of tool IDs that have been activated (full schema should be sent).
@@ -43,12 +43,12 @@ impl ProgressiveToolView {
     ///
     /// All tools start as inactive (compact view only).
     #[must_use]
-    pub fn new(tools: Vec<ToolDescriptor>) -> Self {
+    pub(crate) fn new(tools: Vec<ToolDescriptor>) -> Self {
         Self { all_tools: tools, activated: HashSet::new() }
     }
 
     /// Activate a specific tool by ID (its full schema will be sent).
-    pub fn activate(&mut self, tool_id: &str) {
+    pub(crate) fn activate(&mut self, tool_id: &str) {
         self.activated.insert(tool_id.to_string());
     }
 
@@ -56,7 +56,7 @@ impl ProgressiveToolView {
     ///
     /// This allows the LLM to signal interest in a tool before actually calling it,
     /// so the full schema is available on the next turn.
-    pub fn activate_hints(&mut self, text: &str) {
+    pub(crate) fn activate_hints(&mut self, text: &str) {
         for tool in &self.all_tools {
             let hint = format!("${}", tool.id);
             if text.contains(&hint) {
@@ -67,19 +67,31 @@ impl ProgressiveToolView {
 
     /// Returns `true` if the given tool has been activated.
     #[must_use]
-    pub fn is_activated(&self, tool_id: &str) -> bool {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by unit tests to assert activation state")
+    )]
+    pub(crate) fn is_activated(&self, tool_id: &str) -> bool {
         self.activated.contains(tool_id)
     }
 
     /// Returns the number of currently activated tools.
     #[must_use]
-    pub fn activated_count(&self) -> usize {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by unit tests to assert activation state")
+    )]
+    pub(crate) fn activated_count(&self) -> usize {
         self.activated.len()
     }
 
     /// Returns the total number of tools in the view.
     #[must_use]
-    pub fn total_count(&self) -> usize {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by unit tests to assert activation state")
+    )]
+    pub(crate) fn total_count(&self) -> usize {
         self.all_tools.len()
     }
 
@@ -88,7 +100,7 @@ impl ProgressiveToolView {
     ///
     /// Returns an empty string when no tools are available.
     #[must_use]
-    pub fn summary_prompt(&self) -> String {
+    pub(crate) fn summary_prompt(&self) -> String {
         if self.all_tools.is_empty() {
             return String::new();
         }
@@ -108,15 +120,10 @@ impl ProgressiveToolView {
     /// These are the tools whose complete JSON Schema should be sent to the LLM
     /// (either in the prompt or via native tool calling API).
     #[must_use]
-    pub fn activated_tools(&self) -> Vec<ToolDescriptor> {
+    pub(crate) fn activated_tools(&self) -> Vec<ToolDescriptor> {
         self.all_tools.iter().filter(|t| self.activated.contains(&t.id)).cloned().collect()
     }
 
-    /// Returns all tool descriptors regardless of activation state.
-    #[must_use]
-    pub fn all_tools(&self) -> &[ToolDescriptor] {
-        &self.all_tools
-    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────

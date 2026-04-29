@@ -1,14 +1,21 @@
 # Bob Agent Framework Design
 
+> Status: historical design baseline with a current-state preface.
+>
+> The codebase has evolved since this draft. Use crate docs, `docs/plans/`, and the current
+> workspace `Cargo.toml` files as the source of truth for implementation details.
+> Superseded names preserved in archived sections below include `genai` -> `liter-llm`,
+> `agent-skills` -> `bob-skills`, and `cli-agent` -> `bob-cli`.
+
 ## 1. Goal
 
 Build a reusable Rust agent framework that:
 
 - follows Hexagonal Architecture (ports and adapters),
 - exposes a unified trait-based API ("one runtime trait"),
-- uses `genai` for LLM access,
+- uses `liter-llm` for LLM access,
 - uses official `rmcp` for MCP integration,
-- uses `agent-skills` for skill loading and prompt composition,
+- uses in-tree `bob-skills` for skill loading and prompt composition,
 - focuses framework-level agent abstraction and scheduling.
 
 Project naming:
@@ -16,7 +23,8 @@ Project naming:
 - product/framework name: `bob`.
 - naming rule: keep directory and crate names concise and functional; do not prepend `bob` to directory names.
 
-This document is implementation-ready and can be used as the baseline system design.
+The sections below capture the original design intent and rationale. They are useful as design
+history, but not every dependency name, crate boundary, or feature flag matches the current tree.
 
 ## 2. Design Principles
 
@@ -26,72 +34,82 @@ This document is implementation-ready and can be used as the baseline system des
 4. Deterministic turn loop with explicit state transitions.
 5. Capability-first security: allowlist tools, isolate skills, bound loop steps.
 6. Testability by contract tests for every adapter.
-7. Scheduler FSM is implemented natively in `agent-core` (`enum` + `match`), with no external FSM crate dependency.
+7. Scheduler FSM is implemented natively in `bob-runtime` (`enum` + `match`), with no external FSM crate dependency.
 
 ## 3. Version and Compatibility Baseline (as of 2026-02-19)
 
-- `genai`: pin to `0.6.0-beta.1`.
-- `rmcp`: latest `0.16.0`.
-- `agent-skills`: docs.rs latest `0.2.0` (repo has newer tags; validate before pinning).
+- `liter-llm`: workspace pin `1.3.0`.
+- `rmcp`: workspace pin `1.5.0`.
+- `bob-skills`: in-tree workspace crate `0.3.2`.
+- `tokio`: workspace pin `1.52.1`.
 
 Recommended initial pins for production stability:
 
 ```toml
 [workspace.dependencies]
-genai = "=0.6.0-beta.1"
-rmcp = { version = "0.16", features = ["client", "transport-child-process", "transport-streamable-http-client"] }
-agent-skills = "0.2"
-async-trait = "0.1"
-futures-core = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
-tokio-util = "0.7"
-thiserror = "2"
-tracing = "0.1"
+liter-llm = { version = "1.3.0", default-features = false }
+rmcp = "1.5.0"
+async-trait = "0.1.89"
+serde = "1.0.228"
+serde_json = "1.0.149"
+tokio = "1.52.1"
+tokio-util = "0.7.18"
+thiserror = "2.0.18"
+tracing = "0.1.44"
 ```
+
+Historical dependency sketches in later sections are preserved for traceability and may refer to
+earlier library selections.
 
 ## 4. Workspace and Crate Layout
 
 ```text
-crates/
-  bob-core/                   # domain types, ports (traits), policies, scheduler state machine
-  bob-runtime/                # default orchestrator implementation (depends only on bob-core)
-  bob-adapters/               # all adapter implementations behind feature flags
-    src/
-      llm_genai.rs            # LLM adapter (genai)       — feature "llm-genai"
-      mcp_rmcp.rs             # MCP adapter (rmcp)        — feature "mcp-rmcp"
-      skills_agent.rs         # skills loader/composer     — feature "skills-agent"
-      store_memory.rs         # in-memory store            — feature "store-memory" (default)
-      observe.rs              # tracing + metrics          — feature "observe"
-      lib.rs                  # re-exports enabled adapters
 bin/
-  cli-agent/                  # composition root: wires bob-runtime + bob-adapters
+   bob-cli/                    # CLI composition root for local agent execution
+crates/
+   bob-core/                   # domain types, ports (traits), policies, tape, typed tools
+   bob-runtime/                # default orchestrator implementation and scheduler
+   bob-adapters/               # adapter implementations and durable backends
+    src/
+         llm_liter.rs            # LLM adapter (`liter-llm`)      — feature "llm-liter"
+         mcp_rmcp.rs             # MCP adapter (`rmcp`)           — feature "mcp-rmcp"
+         skills_agent.rs         # skill selection/composition    — feature "skills-agent"
+         store_file.rs           # durable session store
+         store_memory.rs         # in-memory session store        — feature "store-memory"
+         observe.rs              # tracing event sink             — feature "observe-tracing"
+         observe_otel.rs         # OTEL event sink                — feature "observe-otel"
+   bob-chat/                   # chat/channel domain helpers
+   bob-skills/                 # skill parsing, loading, selection, composition
 docs/
   design.md
+   plans/
 ```
 
 ### Feature flags (bob-adapters)
 
 | Feature          | Default | Gate                          |
 |------------------|---------|-------------------------------|
-| `llm-genai`      | yes     | `adapter-llm-genai/` adapter  |
-| `mcp-rmcp`       | yes     | `adapter-mcp-rmcp/` adapter   |
-| `skills-agent`   | yes     | `adapter-skills-agent/` adapter|
-| `store-memory`   | yes     | in-memory store implementation|
-| `observe`        | yes     | tracing + metrics wiring      |
+| `llm-liter`      | yes     | `liter-llm` adapter           |
+| `mcp-rmcp`       | yes     | `rmcp` adapter                |
+| `skills-agent`   | yes     | `bob-skills` integration      |
+| `store-memory`   | no      | in-memory session store       |
+| `observe-tracing`| yes     | `tracing` event sink          |
+| `observe-otel`   | no      | OpenTelemetry event sink      |
+
+Additional adapters such as approval, artifact, checkpoint, cost, journal, and access-control
+backends are compiled directly and are not partitioned by the historical feature layout above.
 
 Hexagonal mapping:
 
 - **Domain** (inside): `bob-core` — scheduling rules, policies, state transitions, port traits.
 - **Ports** (boundary): traits defined in `bob-core`.
-- **Adapters** (outside): `bob-adapters` — concrete implementations selected via feature flags.
+- **Adapters** (outside): `bob-adapters` — concrete implementations over external systems and local backends.
 - **Application / Composition Root**: `bob-runtime` (orchestrator) + `bin/` (wiring).
 
 Dependency boundary rule (mandatory):
 
 1. `bob-runtime` depends **only** on `bob-core`.
-2. `bob-adapters` depends **only** on `bob-core`.
+2. `bob-adapters` depends on `bob-core` plus external libraries, but must **not** depend on `bob-runtime`.
 3. `bob-runtime` must **not** declare direct dependencies on `bob-adapters`.
 4. `bin/` crates wire `bob-runtime` + `bob-adapters` together as composition roots.
 

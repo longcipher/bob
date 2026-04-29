@@ -323,12 +323,14 @@ impl LlmPort for LiterLlmAdapter {
 mod tests {
     use super::*;
 
+    fn test_client() -> Arc<liter_llm::DefaultClient> {
+        let config = liter_llm::ClientConfig::new("test-key");
+        Arc::new(liter_llm::DefaultClient::new(config, None).expect("client creation"))
+    }
+
     #[test]
     fn adapter_is_object_safe() {
-        let config = liter_llm::ClientConfig::new("");
-        let client =
-            Arc::new(liter_llm::DefaultClient::new(config, None).expect("client creation"));
-        let adapter = LiterLlmAdapter::new(client);
+        let adapter = LiterLlmAdapter::new(test_client());
         // Verify it can be stored as `Arc<dyn LlmPort>`.
         let _port: Arc<dyn bob_core::ports::LlmPort> = Arc::new(adapter);
     }
@@ -374,10 +376,7 @@ mod tests {
 
     #[test]
     fn adapter_declares_native_tool_calling_capability() {
-        let config = liter_llm::ClientConfig::new("");
-        let client =
-            Arc::new(liter_llm::DefaultClient::new(config, None).expect("client creation"));
-        let adapter = LiterLlmAdapter::new(client);
+        let adapter = LiterLlmAdapter::new(test_client());
 
         let capabilities = adapter.capabilities();
         assert!(

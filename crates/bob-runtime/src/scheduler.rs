@@ -64,7 +64,7 @@ const STREAM_CHANNEL_CAPACITY: usize = 256;
 /// Safety net that guarantees turn termination by tracking steps,
 /// tool calls, consecutive errors, and elapsed time against [`TurnPolicy`] limits.
 #[derive(Debug)]
-pub struct LoopGuard {
+pub(crate) struct LoopGuard {
     policy: TurnPolicy,
     steps: u32,
     tool_calls: u32,
@@ -75,13 +75,13 @@ pub struct LoopGuard {
 impl LoopGuard {
     /// Create a new guard tied to the given policy.
     #[must_use]
-    pub fn new(policy: TurnPolicy) -> Self {
+    pub(crate) fn new(policy: TurnPolicy) -> Self {
         Self { policy, steps: 0, tool_calls: 0, consecutive_errors: 0, start: Instant::now() }
     }
 
     /// Returns `true` if the turn may continue executing.
     #[must_use]
-    pub fn can_continue(&self) -> bool {
+    pub(crate) fn can_continue(&self) -> bool {
         self.steps < self.policy.max_steps &&
             self.tool_calls < self.policy.max_tool_calls &&
             self.consecutive_errors < self.policy.max_consecutive_errors &&
@@ -89,22 +89,22 @@ impl LoopGuard {
     }
 
     /// Record one scheduler step.
-    pub fn record_step(&mut self) {
+    pub(crate) fn record_step(&mut self) {
         self.steps += 1;
     }
 
     /// Record one tool call.
-    pub fn record_tool_call(&mut self) {
+    pub(crate) fn record_tool_call(&mut self) {
         self.tool_calls += 1;
     }
 
     /// Record a consecutive error.
-    pub fn record_error(&mut self) {
+    pub(crate) fn record_error(&mut self) {
         self.consecutive_errors += 1;
     }
 
     /// Reset the consecutive-error counter (e.g. after a successful call).
-    pub fn reset_errors(&mut self) {
+    pub(crate) fn reset_errors(&mut self) {
         self.consecutive_errors = 0;
     }
 
@@ -112,7 +112,7 @@ impl LoopGuard {
     ///
     /// Only meaningful when [`can_continue`](Self::can_continue) returns `false`.
     #[must_use]
-    pub fn reason(&self) -> GuardReason {
+    pub(crate) fn reason(&self) -> GuardReason {
         if self.steps >= self.policy.max_steps {
             GuardReason::MaxSteps
         } else if self.tool_calls >= self.policy.max_tool_calls {
@@ -129,7 +129,7 @@ impl LoopGuard {
 
     /// Returns `true` if the turn has exceeded its time budget.
     #[must_use]
-    pub fn timed_out(&self) -> bool {
+    pub(crate) fn timed_out(&self) -> bool {
         self.start.elapsed().as_millis() >= u128::from(self.policy.turn_timeout_ms)
     }
 }
@@ -315,7 +315,14 @@ async fn execute_tool_call(
 ///
 /// States: Start → BuildPrompt → LlmInfer → ParseAction → CallTool → Done.
 /// The loop guard guarantees termination under all conditions.
-pub async fn run_turn(
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "test-facing wrapper around the fully injected scheduler entrypoint"
+    )
+)]
+pub(crate) async fn run_turn(
     llm: &dyn LlmPort,
     tools: &dyn ToolPort,
     store: &dyn SessionStore,
@@ -838,7 +845,14 @@ async fn finish_turn(
 }
 
 /// Execute a single turn in streaming mode and return an event stream.
-pub async fn run_turn_stream(
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "test-facing wrapper around the fully injected streaming entrypoint"
+    )
+)]
+pub(crate) async fn run_turn_stream(
     llm: Arc<dyn LlmPort>,
     tools: Arc<dyn ToolPort>,
     store: Arc<dyn SessionStore>,

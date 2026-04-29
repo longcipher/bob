@@ -12,7 +12,7 @@ use serde_json::Value;
 ///
 /// Returns `Ok(())` if valid, or `Err(message)` with a human-readable
 /// validation error description.
-pub fn validate_output(value: &Value, schema: &Value) -> Result<(), String> {
+pub(crate) fn validate_output(value: &Value, schema: &Value) -> Result<(), String> {
     let compiled =
         jsonschema::Validator::new(schema).map_err(|e| format!("invalid schema: {e}"))?;
     if compiled.is_valid(value) {
@@ -26,14 +26,14 @@ pub fn validate_output(value: &Value, schema: &Value) -> Result<(), String> {
 /// Validate a JSON string against a JSON Schema.
 ///
 /// Attempts to parse the string as JSON first, then validates against the schema.
-pub fn validate_output_str(content: &str, schema: &Value) -> Result<Value, String> {
+pub(crate) fn validate_output_str(content: &str, schema: &Value) -> Result<Value, String> {
     let value: Value = serde_json::from_str(content).map_err(|e| format!("invalid JSON: {e}"))?;
     validate_output(&value, schema)?;
     Ok(value)
 }
 
 /// Build a re-prompt message for a validation failure.
-pub fn validation_error_prompt(content: &str, error: &str) -> String {
+pub(crate) fn validation_error_prompt(content: &str, error: &str) -> String {
     format!(
         "Your previous response did not match the required schema.\n\
          Validation error: {error}\n\

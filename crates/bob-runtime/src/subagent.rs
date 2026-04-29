@@ -17,7 +17,11 @@ use std::{
 
 use bob_core::{
     error::AgentError,
-    ports::{EventSink, LlmPort, SessionStore, SubagentPort, ToolPort},
+    journal::ToolJournalPort,
+    ports::{
+        ApprovalPort, ArtifactStorePort, ContextCompactorPort, CostMeterPort, EventSink, LlmPort,
+        SessionStore, SubagentPort, ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
+    },
     types::{
         AgentEvent, AgentRequest, AgentRunResult, CancelToken, RequestContext, SessionId,
         SubagentResult, TokenUsage, ToolCall, ToolDescriptor, ToolResult, TurnPolicy,
@@ -40,6 +44,33 @@ struct ManagerState {
     parent_index: HashMap<SessionId, Vec<SessionId>>,
 }
 
+#[derive(Clone)]
+struct SubagentControls {
+    tool_policy: Arc<dyn ToolPolicyPort>,
+    approval: Arc<dyn ApprovalPort>,
+    dispatch_mode: crate::DispatchMode,
+    checkpoint_store: Arc<dyn TurnCheckpointStorePort>,
+    artifact_store: Arc<dyn ArtifactStorePort>,
+    cost_meter: Arc<dyn CostMeterPort>,
+    context_compactor: Arc<dyn ContextCompactorPort>,
+    journal: Arc<dyn ToolJournalPort>,
+}
+
+impl Default for SubagentControls {
+    fn default() -> Self {
+        Self {
+            tool_policy: Arc::new(crate::DefaultToolPolicyPort),
+            approval: Arc::new(crate::AllowAllApprovalPort),
+            dispatch_mode: crate::DispatchMode::NativePreferred,
+            checkpoint_store: Arc::new(crate::NoOpCheckpointStorePort),
+            artifact_store: Arc::new(crate::NoOpArtifactStorePort),
+            cost_meter: Arc::new(crate::NoOpCostMeterPort),
+            context_compactor: Arc::new(crate::prompt::WindowContextCompactor::default()),
+            journal: Arc::new(crate::NoOpToolJournalPort),
+        }
+    }
+}
+
 /// Default subagent manager implementation.
 pub struct DefaultSubagentManager {
     llm: Arc<dyn LlmPort>,
@@ -48,7 +79,8 @@ pub struct DefaultSubagentManager {
     tools: Arc<dyn ToolPort>,
     default_model: String,
     policy: TurnPolicy,
-    state: Mutex<ManagerState>,
+    controls: SubagentControls,
+    state: Arc<Mutex<ManagerState>>,
 }
 
 impl std::fmt::Debug for DefaultSubagentManager {
@@ -71,6 +103,27 @@ impl DefaultSubagentManager {
         default_model: String,
         policy: TurnPolicy,
     ) -> Self {
+        Self::new_with_controls(
+            llm,
+            store,
+            events,
+            tools,
+            default_model,
+            policy,
+            SubagentControls::default(),
+        )
+    }
+
+    #[must_use]
+    fn new_with_controls(
+        llm: Arc<dyn LlmPort>,
+        store: Arc<dyn SessionStore>,
+        events: Arc<dyn EventSink>,
+        tools: Arc<dyn ToolPort>,
+        default_model: String,
+        policy: TurnPolicy,
+        controls: SubagentControls,
+    ) -> Self {
         Self {
             llm,
             store,
@@ -78,8 +131,17 @@ impl DefaultSubagentManager {
             tools,
             default_model,
             policy,
-            state: Mutex::new(ManagerState::default()),
+            controls,
+            state: Arc::new(Mutex::new(ManagerState::default())),
         }
+    }
+
+    fn prune_subagent_references(state: &mut ManagerState, subagent_id: &SessionId) {
+        state.active.remove(subagent_id);
+        state.parent_index.retain(|_, ids| {
+            ids.retain(|id| id != subagent_id);
+            !ids.is_empty()
+        });
     }
 }
 
@@ -120,6 +182,8 @@ impl SubagentPort for DefaultSubagentManager {
         let store = self.store.clone();
         let events = self.events.clone();
         let tools = self.tools.clone();
+        let state = self.state.clone();
+        let controls = self.controls.clone();
         let model_str = model.unwrap_or_else(|| self.default_model.clone());
         let mut policy = self.policy.clone();
         if let Some(steps) = max_steps {
@@ -130,23 +194,27 @@ impl SubagentPort for DefaultSubagentManager {
         // Build deny list: always deny subagent spawning + any extras.
         let mut deny_tools = vec!["subagent/spawn".to_string()];
         deny_tools.extend(extra_deny_tools);
+        let tool_policy_deny_tools = deny_tools.clone();
         let filtered_tools: Arc<dyn ToolPort> =
             Arc::new(DenyListToolPort { inner: tools, deny: deny_tools });
 
         tokio::spawn(async move {
             debug!(subagent_id = %sid, "subagent task started");
 
+            let mut context = RequestContext::default();
+            context.tool_policy.deny_tools = tool_policy_deny_tools;
+
             let req = AgentRequest {
                 input: task,
                 session_id: sid.clone(),
                 model: Some(model_str),
-                context: RequestContext::default(),
+                context,
                 cancel_token: Some(cancel_token),
                 output_schema: None,
                 max_output_retries: 0,
             };
 
-            let result = crate::scheduler::run_turn(
+            let result = crate::scheduler::run_turn_with_extensions(
                 llm.as_ref(),
                 filtered_tools.as_ref(),
                 store.as_ref(),
@@ -154,6 +222,14 @@ impl SubagentPort for DefaultSubagentManager {
                 req,
                 &policy,
                 "subagent-default",
+                controls.tool_policy.as_ref(),
+                controls.approval.as_ref(),
+                controls.dispatch_mode,
+                controls.checkpoint_store.as_ref(),
+                controls.artifact_store.as_ref(),
+                controls.cost_meter.as_ref(),
+                controls.context_compactor.as_ref(),
+                controls.journal.as_ref(),
             )
             .await;
 
@@ -179,11 +255,8 @@ impl SubagentPort for DefaultSubagentManager {
 
             events.emit(AgentEvent::SubagentCompleted { subagent_id: sid.clone(), is_error });
 
-            // Remove from active list.
-            {
-                // We don't have a reference to state here since we're in a spawned task.
-                // The active entry will be cleaned up when list_active checks it.
-            }
+            let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
+            Self::prune_subagent_references(&mut state, &sid);
 
             info!(subagent_id = %sid, is_error, "subagent task completed");
         });
@@ -198,12 +271,17 @@ impl SubagentPort for DefaultSubagentManager {
         };
 
         match rx {
-            Some(receiver) => match receiver.await {
-                Ok(result) => Ok(result),
-                Err(_) => {
+            Some(receiver) => {
+                if let Ok(result) = receiver.await {
+                    let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    Self::prune_subagent_references(&mut state, subagent_id);
+                    Ok(result)
+                } else {
+                    let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    Self::prune_subagent_references(&mut state, subagent_id);
                     Err(AgentError::Internal("subagent task dropped without sending result".into()))
                 }
-            },
+            }
             None => Err(AgentError::Config(format!(
                 "subagent '{subagent_id}' not found (already awaited or never spawned)"
             ))),
@@ -235,6 +313,8 @@ impl SubagentPort for DefaultSubagentManager {
         match handle {
             Some(h) => {
                 h.cancel_token.cancel();
+                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                Self::prune_subagent_references(&mut state, subagent_id);
                 debug!(subagent_id = %subagent_id, "subagent cancelled");
                 Ok(())
             }
@@ -392,10 +472,13 @@ fn rand_u16() -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use bob_core::{
-        error::{LlmError, StoreError, ToolError},
+        error::{CostError, LlmError, StoreError, ToolError},
         types::{FinishReason, LlmRequest, LlmResponse, LlmStream, SessionState, TokenUsage},
     };
 
@@ -451,6 +534,35 @@ mod tests {
         fn emit(&self, _event: AgentEvent) {}
     }
 
+    struct TrackingCostMeter {
+        llm_usage_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl bob_core::ports::CostMeterPort for TrackingCostMeter {
+        async fn check_budget(&self, _session_id: &SessionId) -> Result<(), CostError> {
+            Ok(())
+        }
+
+        async fn record_llm_usage(
+            &self,
+            _session_id: &SessionId,
+            _model: &str,
+            _usage: &TokenUsage,
+        ) -> Result<(), CostError> {
+            self.llm_usage_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn record_tool_result(
+            &self,
+            _session_id: &SessionId,
+            _tool_result: &ToolResult,
+        ) -> Result<(), CostError> {
+            Ok(())
+        }
+    }
+
     fn create_manager() -> DefaultSubagentManager {
         DefaultSubagentManager::new(
             Arc::new(StubLlm),
@@ -459,6 +571,21 @@ mod tests {
             Arc::new(StubTools),
             "test-model".to_string(),
             TurnPolicy::default(),
+        )
+    }
+
+    fn create_manager_with_cost_meter(llm_usage_calls: Arc<AtomicUsize>) -> DefaultSubagentManager {
+        DefaultSubagentManager::new_with_controls(
+            Arc::new(StubLlm),
+            Arc::new(StubStore),
+            Arc::new(StubSink),
+            Arc::new(StubTools),
+            "test-model".to_string(),
+            TurnPolicy::default(),
+            SubagentControls {
+                cost_meter: Arc::new(TrackingCostMeter { llm_usage_calls }),
+                ..SubagentControls::default()
+            },
         )
     }
 
@@ -561,5 +688,41 @@ mod tests {
         let active =
             manager.list_active(&"parent-1".into()).await.unwrap_or_else(|_| unreachable!());
         assert_eq!(active.len(), 1, "should have one active subagent");
+    }
+
+    #[tokio::test]
+    async fn completed_subagent_is_removed_from_active_list() {
+        let manager = create_manager();
+
+        let id = manager
+            .spawn("test task".into(), "parent-1".into(), None, None, vec![])
+            .await
+            .unwrap_or_else(|_| unreachable!());
+
+        let result = manager.await_result(&id).await;
+        assert!(result.is_ok(), "subagent result should be delivered");
+
+        let active =
+            manager.list_active(&"parent-1".into()).await.unwrap_or_else(|_| unreachable!());
+        assert!(active.is_empty(), "completed subagents should not remain active");
+    }
+
+    #[tokio::test]
+    async fn subagent_uses_injected_cost_meter() {
+        let llm_usage_calls = Arc::new(AtomicUsize::new(0));
+        let manager = create_manager_with_cost_meter(llm_usage_calls.clone());
+
+        let id = manager
+            .spawn("test task".into(), "parent-1".into(), None, None, vec![])
+            .await
+            .unwrap_or_else(|_| unreachable!());
+
+        let result = manager.await_result(&id).await;
+        assert!(result.is_ok(), "subagent result should be delivered");
+        assert_eq!(
+            llm_usage_calls.load(Ordering::SeqCst),
+            1,
+            "subagent runs should use the injected cost meter rather than default no-op controls"
+        );
     }
 }

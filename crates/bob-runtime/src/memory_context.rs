@@ -38,7 +38,10 @@
 /// # Returns
 ///
 /// System instructions with memory context injected, or original instructions if no memory
-pub fn inject_memory_prompt(system_instructions: &str, memory_summary: Option<&str>) -> String {
+pub(crate) fn inject_memory_prompt(
+    system_instructions: &str,
+    memory_summary: Option<&str>,
+) -> String {
     let Some(memory) = memory_summary else {
         return system_instructions.to_string();
     };

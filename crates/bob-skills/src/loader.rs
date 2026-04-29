@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::RwLock,
+    sync::{Arc, RwLock},
 };
 
 use tracing::{debug, info, instrument, warn};
@@ -18,6 +18,8 @@ use crate::{
     store::{SkillStore, SkillStoreSync},
     types::SkillEntry,
 };
+
+type SkillCache = RwLock<HashMap<String, SkillEntry>>;
 
 /// Configuration for a skill source directory.
 #[derive(Debug, Clone)]
@@ -36,21 +38,21 @@ impl SkillSource {
     }
 }
 
-/// Filesystem-based skill store with concurrent-safe caching.
+/// Filesystem-based skill store with shared cached metadata.
 ///
 /// Loads skills from one or more source directories and caches them
-/// in a lock-free [`HashIndex`] for fast concurrent reads.
+/// in a shared in-memory map for fast concurrent reads.
 #[derive(Debug)]
 pub struct FsSkillStore {
     sources: Vec<SkillSource>,
-    cache: RwLock<HashMap<String, SkillEntry>>,
+    cache: Arc<SkillCache>,
 }
 
 impl FsSkillStore {
     /// Create a new filesystem skill store from source configurations.
     #[must_use]
     pub fn new(sources: Vec<SkillSource>) -> Self {
-        Self { sources, cache: RwLock::new(HashMap::new()) }
+        Self { sources, cache: Arc::new(RwLock::new(HashMap::new())) }
     }
 
     /// Create from a single directory path (non-recursive).
@@ -69,8 +71,12 @@ impl FsSkillStore {
     ///
     /// This clears the existing cache and re-discovers all skill directories.
     pub fn reload(&self) -> Result<(), SkillError> {
-        let entries = self.discover_all()?;
-        let mut cache = self.cache.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::reload_with(&self.sources, self.cache.as_ref())
+    }
+
+    fn reload_with(sources: &[SkillSource], cache: &SkillCache) -> Result<(), SkillError> {
+        let entries = Self::discover_from_sources(sources)?;
+        let mut cache = cache.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.clear();
         for entry in entries {
             cache.insert(entry.name().to_string(), entry);
@@ -79,9 +85,9 @@ impl FsSkillStore {
         Ok(())
     }
 
-    fn discover_all(&self) -> Result<Vec<SkillEntry>, SkillError> {
+    fn discover_from_sources(sources: &[SkillSource]) -> Result<Vec<SkillEntry>, SkillError> {
         let mut dirs = Vec::new();
-        for source in &self.sources {
+        for source in sources {
             collect_skill_dirs(&source.path, source.recursive, &mut dirs)?;
         }
         dirs.sort();
@@ -104,64 +110,114 @@ impl FsSkillStore {
         Ok(entries)
     }
 
-    fn ensure_loaded(&self) -> Result<(), SkillError> {
-        let is_empty = self
-            .cache
+    fn ensure_loaded_with(sources: &[SkillSource], cache: &SkillCache) -> Result<(), SkillError> {
+        let is_empty = cache
             .read()
             .map_or_else(|poisoned| poisoned.into_inner().is_empty(), |lock| lock.is_empty());
         if is_empty {
-            self.reload()?;
+            Self::reload_with(sources, cache)?;
         }
         Ok(())
     }
-}
 
-impl SkillStoreSync for FsSkillStore {
-    fn load_all(&self) -> Result<Vec<SkillEntry>, SkillError> {
-        self.ensure_loaded()?;
-        let cache = self.cache.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn load_all_with(
+        sources: &[SkillSource],
+        cache: &SkillCache,
+    ) -> Result<Vec<SkillEntry>, SkillError> {
+        Self::ensure_loaded_with(sources, cache)?;
+        let cache = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut entries: Vec<SkillEntry> = cache.values().cloned().collect();
         entries.sort_by(|a, b| a.name().cmp(b.name()));
         Ok(entries)
     }
 
-    fn find(&self, name: &str) -> Result<Option<SkillEntry>, SkillError> {
-        self.ensure_loaded()?;
-        let cache = self.cache.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn find_with(
+        sources: &[SkillSource],
+        cache: &SkillCache,
+        name: &str,
+    ) -> Result<Option<SkillEntry>, SkillError> {
+        Self::ensure_loaded_with(sources, cache)?;
+        let cache = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         Ok(cache.get(name).cloned())
     }
 
-    fn list_names(&self) -> Result<Vec<String>, SkillError> {
-        self.ensure_loaded()?;
-        let cache = self.cache.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn list_names_with(
+        sources: &[SkillSource],
+        cache: &SkillCache,
+    ) -> Result<Vec<String>, SkillError> {
+        Self::ensure_loaded_with(sources, cache)?;
+        let cache = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut names: Vec<String> = cache.keys().cloned().collect();
         names.sort();
         Ok(names)
     }
 
-    fn count(&self) -> Result<usize, SkillError> {
-        self.ensure_loaded()?;
-        let cache = self.cache.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn count_with(sources: &[SkillSource], cache: &SkillCache) -> Result<usize, SkillError> {
+        Self::ensure_loaded_with(sources, cache)?;
+        let cache = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         Ok(cache.len())
+    }
+
+    async fn run_blocking<T, F>(&self, operation: &'static str, task: F) -> Result<T, SkillError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Vec<SkillSource>, Arc<SkillCache>) -> Result<T, SkillError> + Send + 'static,
+    {
+        let sources = self.sources.clone();
+        let cache = Arc::clone(&self.cache);
+        tokio::task::spawn_blocking(move || task(sources, cache)).await.map_err(|err| {
+            SkillError::Io(std::io::Error::other(format!(
+                "skill store {operation} task failed: {err}"
+            )))
+        })?
+    }
+}
+
+impl SkillStoreSync for FsSkillStore {
+    fn load_all(&self) -> Result<Vec<SkillEntry>, SkillError> {
+        Self::load_all_with(&self.sources, self.cache.as_ref())
+    }
+
+    fn find(&self, name: &str) -> Result<Option<SkillEntry>, SkillError> {
+        Self::find_with(&self.sources, self.cache.as_ref(), name)
+    }
+
+    fn list_names(&self) -> Result<Vec<String>, SkillError> {
+        Self::list_names_with(&self.sources, self.cache.as_ref())
+    }
+
+    fn count(&self) -> Result<usize, SkillError> {
+        Self::count_with(&self.sources, self.cache.as_ref())
     }
 }
 
 #[async_trait::async_trait]
 impl SkillStore for FsSkillStore {
     async fn load_all(&self) -> Result<Vec<SkillEntry>, SkillError> {
-        SkillStoreSync::load_all(self)
+        self.run_blocking("load_all", |sources, cache| {
+            Self::load_all_with(&sources, cache.as_ref())
+        })
+        .await
     }
 
     async fn find(&self, name: &str) -> Result<Option<SkillEntry>, SkillError> {
-        SkillStoreSync::find(self, name)
+        let name = name.to_string();
+        self.run_blocking("find", move |sources, cache| {
+            Self::find_with(&sources, cache.as_ref(), &name)
+        })
+        .await
     }
 
     async fn list_names(&self) -> Result<Vec<String>, SkillError> {
-        SkillStoreSync::list_names(self)
+        self.run_blocking("list_names", |sources, cache| {
+            Self::list_names_with(&sources, cache.as_ref())
+        })
+        .await
     }
 
     async fn count(&self) -> Result<usize, SkillError> {
-        SkillStoreSync::count(self)
+        self.run_blocking("count", |sources, cache| Self::count_with(&sources, cache.as_ref()))
+            .await
     }
 }
 
@@ -319,5 +375,20 @@ mod tests {
         let names = SkillStoreSync::list_names(&store).unwrap();
 
         assert_eq!(names, vec!["alpha", "mu", "zebra"]);
+    }
+
+    #[test]
+    fn async_store_loads_skills() {
+        let temp = TempDir::new().unwrap();
+        write_skill(temp.path(), "alpha", "First skill.", "Body A.");
+        write_skill(temp.path(), "beta", "Second skill.", "Body B.");
+
+        let store = FsSkillStore::from_path(temp.path().to_path_buf());
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let entries = runtime.block_on(SkillStore::load_all(&store)).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name(), "alpha");
+        assert_eq!(entries[1].name(), "beta");
     }
 }

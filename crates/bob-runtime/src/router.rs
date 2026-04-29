@@ -22,7 +22,7 @@
 
 /// Result of routing a user input string.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RouteResult {
+pub(crate) enum RouteResult {
     /// A deterministic slash command (bypass LLM).
     SlashCommand(SlashCommand),
     /// Natural language input destined for the LLM pipeline.
@@ -31,7 +31,7 @@ pub enum RouteResult {
 
 /// Recognized slash commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SlashCommand {
+pub(crate) enum SlashCommand {
     /// `/help` — display available commands.
     Help,
     /// `/tools` — list all registered tools.
@@ -59,7 +59,7 @@ pub enum SlashCommand {
 /// Only inputs starting with `/` are treated as commands. Everything else
 /// goes to the LLM pipeline as natural language.
 #[must_use]
-pub fn route(input: &str) -> RouteResult {
+pub(crate) fn route(input: &str) -> RouteResult {
     let trimmed = input.trim();
 
     if !trimmed.starts_with('/') {
@@ -99,7 +99,7 @@ pub fn route(input: &str) -> RouteResult {
 
 /// Render the help text for all available slash commands.
 #[must_use]
-pub fn help_text() -> String {
+pub(crate) fn help_text() -> String {
     "\
 Available commands:
   /help                 Show this help message

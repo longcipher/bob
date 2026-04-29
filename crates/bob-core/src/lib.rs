@@ -15,12 +15,18 @@
 //!
 //! ## Architecture
 //!
-//! The crate defines four primary port traits:
+//! The crate defines the runtime-facing port surface for orchestration and adapters.
+//! Representative boundaries include:
 //!
-//! 1. [`ports::LlmPort`] - Interface for language model interactions
-//! 2. [`ports::ToolPort`] - Interface for tool/system operations
-//! 3. [`ports::SessionStore`] - Interface for session state persistence
-//! 4. [`ports::EventSink`] - Interface for event observation and logging
+//! 1. [`ports::LlmPort`] and [`ports::ContextCompactorPort`] for model inference and prompt history
+//!    compaction
+//! 2. [`ports::ToolCatalogPort`], [`ports::ToolExecutorPort`], [`ports::ToolPolicyPort`], and
+//!    [`ports::ApprovalPort`] for tool discovery, execution, and governance
+//! 3. [`ports::SessionStore`], [`ports::TurnCheckpointStorePort`], [`ports::ArtifactStorePort`],
+//!    and [`ports::TapeStorePort`] for persisted runtime state
+//! 4. [`ports::EventSink`], [`ports::CostMeterPort`], [`ports::ActivityJournalPort`],
+//!    [`ports::MessageBusPort`], [`ports::AccessControlPort`], and [`ports::SubagentPort`] for
+//!    observability and coordination
 //!
 //! ## Example
 //!

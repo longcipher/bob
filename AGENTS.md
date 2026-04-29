@@ -38,12 +38,12 @@ When introducing new dependencies, prefer these versions unless compatibility re
 
 ```toml
 # rust
-clap = "4.6.0"
+clap = "4.6.1"
 config = "0.15.22"
 eyre = "0.6.12"
 serde = "1.0.228"
 thiserror = "2.0.18"
-tokio = "1.50.0"
+tokio = "1.52.1"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 tracing-opentelemetry = "0.32.1"
@@ -52,12 +52,12 @@ opentelemetry-otlp = "0.31.1"
 sqlx = "=0.9.0-alpha.1"
 utoipa = "5.4.0"
 utoipa-swagger-ui = "9.0.2"
-arc-swap = "1.9.0"
-hpx = "2.4.3"
-scc = "3.6.12"
-winnow = "1.0.0"
-shadow-rs = "1.7.1"
-ecdysis = "1.0.1"
+arc-swap = "1.9.1"
+hpx = "2.4.10"
+scc = "3.7.0"
+winnow = "1.0.2"
+shadow-rs = "2.0.0"
+ecdysis = "1.1.1"
 ```
 
 ## Dependency Priority and Forbidden Choices

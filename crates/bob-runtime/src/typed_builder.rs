@@ -294,22 +294,22 @@ impl TypedRuntimeBuilder<Ready> {
             tools = layer.wrap(tools);
         }
 
-        let rt = DefaultAgentRuntime {
+        let rt = DefaultAgentRuntime::new(
             llm,
             tools,
             store,
             events,
             default_model,
-            policy: self.policy,
+            self.policy,
             tool_policy,
             approval,
-            dispatch_mode: self.dispatch_mode,
+            self.dispatch_mode,
             checkpoint_store,
             artifact_store,
             cost_meter,
             context_compactor,
             journal,
-        };
+        );
         Ok(Arc::new(rt))
     }
 }

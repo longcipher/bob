@@ -125,6 +125,16 @@ impl FileSessionStore {
         }
         Ok(())
     }
+
+    async fn current_version(&self, session_id: &SessionId) -> Result<u64, StoreError> {
+        if let Some(version) = self.cache.read_async(session_id, |_key, value| value.version).await
+        {
+            return Ok(version);
+        }
+
+        let loaded = self.load_from_disk(session_id).await?;
+        Ok(loaded.map_or(0, |state| state.version))
+    }
 }
 
 #[async_trait::async_trait]
@@ -150,8 +160,7 @@ impl SessionStore for FileSessionStore {
     async fn save(&self, id: &SessionId, state: &SessionState) -> Result<(), StoreError> {
         let _lock = self.write_guard.lock().await;
         let mut updated = state.clone();
-        // Read current version from cache or disk.
-        let current_version = self.cache.read_async(id, |_k, v| v.version).await.unwrap_or(0);
+        let current_version = self.current_version(id).await?;
         updated.version = current_version.saturating_add(1);
         self.save_to_disk(id, &updated).await?;
 
@@ -174,13 +183,7 @@ impl SessionStore for FileSessionStore {
         expected_version: u64,
     ) -> Result<u64, StoreError> {
         let _lock = self.write_guard.lock().await;
-        // Read current version from cache or disk.
-        let current_version = if let Some(v) = self.cache.read_async(id, |_k, v| v.version).await {
-            v
-        } else {
-            let loaded = self.load_from_disk(id).await?;
-            loaded.map_or(0, |s| s.version)
-        };
+        let current_version = self.current_version(id).await?;
 
         if current_version != expected_version {
             return Err(StoreError::VersionConflict {
@@ -281,13 +284,17 @@ mod tests {
             Ok(value) => value,
             Err(_) => return,
         };
-        let loaded = second.load(&session_id).await;
-        assert!(loaded.is_ok(), "load should succeed after restart");
-        let loaded = loaded.ok().flatten();
-        assert!(loaded.is_some(), "session should exist");
-        let loaded = loaded.unwrap_or_default();
-        assert_eq!(loaded.messages.len(), 1);
-        assert_eq!(loaded.total_usage.total(), 6);
+        let saved_again = second.save(&session_id, &state).await;
+        assert!(saved_again.is_ok(), "save after restart should succeed even on a cold cache");
+
+        let reloaded = second.load(&session_id).await;
+        assert!(reloaded.is_ok(), "reload after second save should succeed");
+        let reloaded = reloaded.ok().flatten();
+        assert!(reloaded.is_some(), "session should still exist after second save");
+        let reloaded = reloaded.unwrap_or_default();
+        assert_eq!(reloaded.messages.len(), 1);
+        assert_eq!(reloaded.total_usage.total(), 6);
+        assert_eq!(reloaded.version, 2, "version should keep increasing across restarts");
     }
 
     #[tokio::test]

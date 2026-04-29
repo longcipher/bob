@@ -2,7 +2,8 @@
 //!
 //! Hexagonal port traits for the Bob Agent Framework.
 //!
-//! These are the 4 v1 boundaries that adapters must implement.
+//! These ports define the runtime boundary between `bob-runtime` and concrete adapters.
+//! Consumers should depend on the narrowest port surface that fits their use case.
 //! All async traits use `async_trait` for dyn-compatibility.
 //!
 //! ## Architecture

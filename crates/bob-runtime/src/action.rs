@@ -40,7 +40,7 @@ use bob_core::types::AgentAction;
 
 /// Errors that can occur when parsing an [`AgentAction`] from LLM output.
 #[derive(Debug, thiserror::Error)]
-pub enum ActionParseError {
+pub(crate) enum ActionParseError {
     /// The input could not be parsed as valid JSON.
     #[error("invalid JSON: {0}")]
     InvalidJson(#[from] serde_json::Error),
@@ -60,7 +60,7 @@ pub enum ActionParseError {
 ///
 /// Handles optional markdown code fences (`` ```json `` / `` ``` ``) and
 /// leading/trailing whitespace.
-pub fn parse_action(content: &str) -> Result<AgentAction, ActionParseError> {
+pub(crate) fn parse_action(content: &str) -> Result<AgentAction, ActionParseError> {
     let stripped = strip_code_fences(content);
 
     // First pass: ensure it is valid JSON and is an object.

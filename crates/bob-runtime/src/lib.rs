@@ -62,12 +62,12 @@
 //! - **Turn Policies**: Configurable limits for steps, timeouts, and retries
 //! - **Health Monitoring**: Built-in health check endpoints
 //!
-//! ## Modules
+//! ## Public Surface
 //!
-//! - [`scheduler`] - Core FSM implementation for agent execution
-//! - [`action`] - Action types and parser for LLM responses
-//! - [`prompt`] - Prompt construction and tool definition formatting
-//! - [`composite`] - Multi-source tool aggregation
+//! The stable surface of this crate is centered on [`AgentRuntime`], [`RuntimeBuilder`],
+//! [`Agent`], [`Session`], [`DispatchMode`], and the explicitly exported integration helpers.
+//! Lower-level scheduler, prompt, parsing, and routing modules remain internal implementation
+//! details so the runtime can evolve without forcing downstream callers onto those paths.
 //!
 //! ## Related Crates
 //!
@@ -79,18 +79,18 @@
 
 #![forbid(unsafe_code)]
 
-pub mod action;
-pub mod agent_loop;
+mod action;
+mod agent_loop;
 pub mod classifier;
 pub mod composite;
-pub mod memory_context;
+mod memory_context;
 pub mod message_bus;
-pub mod output_validation;
-pub mod progressive_tools;
-pub mod prompt;
-pub mod router;
-pub mod scheduler;
-pub mod session;
+mod output_validation;
+mod progressive_tools;
+mod prompt;
+mod router;
+mod scheduler;
+mod session;
 pub mod subagent;
 pub mod tooling;
 pub mod tower_service;
@@ -446,22 +446,22 @@ impl RuntimeBuilder {
             tools = layer.wrap(tools);
         }
 
-        let rt = DefaultAgentRuntime {
+        let rt = DefaultAgentRuntime::new(
             llm,
             tools,
             store,
             events,
             default_model,
-            policy: self.policy,
+            self.policy,
             tool_policy,
             approval,
-            dispatch_mode: self.dispatch_mode,
+            self.dispatch_mode,
             checkpoint_store,
             artifact_store,
             cost_meter,
             context_compactor,
             journal,
-        };
+        );
         Ok(Arc::new(rt))
     }
 }
@@ -492,27 +492,67 @@ pub trait AgentRuntime: Send + Sync {
 
 // ── Default Implementation ───────────────────────────────────────────
 
-/// Default runtime that composes the 4 port traits via `Arc<dyn ...>`.
-pub struct DefaultAgentRuntime {
-    pub llm: Arc<dyn LlmPort>,
-    pub tools: Arc<dyn ToolPort>,
-    pub store: Arc<dyn SessionStore>,
-    pub events: Arc<dyn EventSink>,
-    pub default_model: String,
-    pub policy: TurnPolicy,
-    pub tool_policy: Arc<dyn ToolPolicyPort>,
-    pub approval: Arc<dyn ApprovalPort>,
-    pub dispatch_mode: DispatchMode,
-    pub checkpoint_store: Arc<dyn TurnCheckpointStorePort>,
-    pub artifact_store: Arc<dyn ArtifactStorePort>,
-    pub cost_meter: Arc<dyn CostMeterPort>,
-    pub context_compactor: Arc<dyn ContextCompactorPort>,
-    pub journal: Arc<dyn ToolJournalPort>,
+/// Default runtime implementation backing the trait-first public API.
+struct DefaultAgentRuntime {
+    llm: Arc<dyn LlmPort>,
+    tools: Arc<dyn ToolPort>,
+    store: Arc<dyn SessionStore>,
+    events: Arc<dyn EventSink>,
+    default_model: String,
+    policy: TurnPolicy,
+    tool_policy: Arc<dyn ToolPolicyPort>,
+    approval: Arc<dyn ApprovalPort>,
+    dispatch_mode: DispatchMode,
+    checkpoint_store: Arc<dyn TurnCheckpointStorePort>,
+    artifact_store: Arc<dyn ArtifactStorePort>,
+    cost_meter: Arc<dyn CostMeterPort>,
+    context_compactor: Arc<dyn ContextCompactorPort>,
+    journal: Arc<dyn ToolJournalPort>,
 }
 
 impl std::fmt::Debug for DefaultAgentRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DefaultAgentRuntime").finish_non_exhaustive()
+    }
+}
+
+impl DefaultAgentRuntime {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "runtime construction bundles all injected ports in one place"
+    )]
+    fn new(
+        llm: Arc<dyn LlmPort>,
+        tools: Arc<dyn ToolPort>,
+        store: Arc<dyn SessionStore>,
+        events: Arc<dyn EventSink>,
+        default_model: String,
+        policy: TurnPolicy,
+        tool_policy: Arc<dyn ToolPolicyPort>,
+        approval: Arc<dyn ApprovalPort>,
+        dispatch_mode: DispatchMode,
+        checkpoint_store: Arc<dyn TurnCheckpointStorePort>,
+        artifact_store: Arc<dyn ArtifactStorePort>,
+        cost_meter: Arc<dyn CostMeterPort>,
+        context_compactor: Arc<dyn ContextCompactorPort>,
+        journal: Arc<dyn ToolJournalPort>,
+    ) -> Self {
+        Self {
+            llm,
+            tools,
+            store,
+            events,
+            default_model,
+            policy,
+            tool_policy,
+            approval,
+            dispatch_mode,
+            checkpoint_store,
+            artifact_store,
+            cost_meter,
+            context_compactor,
+            journal,
+        }
     }
 }
 
@@ -693,22 +733,22 @@ mod tests {
 
     #[tokio::test]
     async fn default_runtime_run() {
-        let rt: Arc<dyn AgentRuntime> = Arc::new(DefaultAgentRuntime {
-            llm: Arc::new(StubLlm),
-            tools: Arc::new(StubTools),
-            store: Arc::new(StubStore),
-            events: Arc::new(StubSink { count: Mutex::new(0) }),
-            default_model: "test-model".into(),
-            policy: TurnPolicy::default(),
-            tool_policy: Arc::new(DefaultToolPolicyPort),
-            approval: Arc::new(AllowAllApprovalPort),
-            dispatch_mode: DispatchMode::PromptGuided,
-            checkpoint_store: Arc::new(NoOpCheckpointStorePort),
-            artifact_store: Arc::new(NoOpArtifactStorePort),
-            cost_meter: Arc::new(NoOpCostMeterPort),
-            context_compactor: Arc::new(crate::prompt::WindowContextCompactor::default()),
-            journal: Arc::new(NoOpToolJournalPort),
-        });
+        let rt: Arc<dyn AgentRuntime> = Arc::new(DefaultAgentRuntime::new(
+            Arc::new(StubLlm),
+            Arc::new(StubTools),
+            Arc::new(StubStore),
+            Arc::new(StubSink { count: Mutex::new(0) }),
+            "test-model".into(),
+            TurnPolicy::default(),
+            Arc::new(DefaultToolPolicyPort),
+            Arc::new(AllowAllApprovalPort),
+            DispatchMode::PromptGuided,
+            Arc::new(NoOpCheckpointStorePort),
+            Arc::new(NoOpArtifactStorePort),
+            Arc::new(NoOpCostMeterPort),
+            Arc::new(crate::prompt::WindowContextCompactor::default()),
+            Arc::new(NoOpToolJournalPort),
+        ));
 
         let req = AgentRequest {
             input: "hello".into(),
@@ -733,22 +773,22 @@ mod tests {
 
     #[tokio::test]
     async fn default_runtime_health() {
-        let rt = DefaultAgentRuntime {
-            llm: Arc::new(StubLlm),
-            tools: Arc::new(StubTools),
-            store: Arc::new(StubStore),
-            events: Arc::new(StubSink { count: Mutex::new(0) }),
-            default_model: "test-model".into(),
-            policy: TurnPolicy::default(),
-            tool_policy: Arc::new(DefaultToolPolicyPort),
-            approval: Arc::new(AllowAllApprovalPort),
-            dispatch_mode: DispatchMode::PromptGuided,
-            checkpoint_store: Arc::new(NoOpCheckpointStorePort),
-            artifact_store: Arc::new(NoOpArtifactStorePort),
-            cost_meter: Arc::new(NoOpCostMeterPort),
-            context_compactor: Arc::new(crate::prompt::WindowContextCompactor::default()),
-            journal: Arc::new(NoOpToolJournalPort),
-        };
+        let rt = DefaultAgentRuntime::new(
+            Arc::new(StubLlm),
+            Arc::new(StubTools),
+            Arc::new(StubStore),
+            Arc::new(StubSink { count: Mutex::new(0) }),
+            "test-model".into(),
+            TurnPolicy::default(),
+            Arc::new(DefaultToolPolicyPort),
+            Arc::new(AllowAllApprovalPort),
+            DispatchMode::PromptGuided,
+            Arc::new(NoOpCheckpointStorePort),
+            Arc::new(NoOpArtifactStorePort),
+            Arc::new(NoOpCostMeterPort),
+            Arc::new(crate::prompt::WindowContextCompactor::default()),
+            Arc::new(NoOpToolJournalPort),
+        );
 
         let health = rt.health().await;
         assert_eq!(health.status, HealthStatus::Healthy);

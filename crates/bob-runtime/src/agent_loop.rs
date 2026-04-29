@@ -32,7 +32,7 @@ use bob_core::{
 };
 
 // Re-export for convenience.
-pub use crate::router::help_text;
+pub(crate) use crate::router::help_text;
 use crate::{
     AgentRuntime,
     router::{self, RouteResult, SlashCommand},
@@ -40,7 +40,7 @@ use crate::{
 
 /// Output from the agent loop after processing a single input.
 #[derive(Debug)]
-pub enum AgentLoopOutput {
+pub(crate) enum AgentLoopOutput {
     /// A response from the LLM pipeline (normal conversation).
     Response(AgentRunResult),
     /// A deterministic command response (no LLM involved).
@@ -61,7 +61,7 @@ pub enum AgentLoopOutput {
 ///     .with_tape(tape_store)
 ///     .with_system_prompt("You are a helpful assistant.".to_string());
 /// ```
-pub struct AgentLoop {
+pub(crate) struct AgentLoop {
     runtime: Arc<dyn AgentRuntime>,
     tools: Arc<dyn ToolPort>,
     store: Option<Arc<dyn SessionStore>>,
@@ -83,27 +83,27 @@ impl std::fmt::Debug for AgentLoop {
 impl AgentLoop {
     /// Create a new agent loop wrapping the given runtime and tool port.
     #[must_use]
-    pub fn new(runtime: Arc<dyn AgentRuntime>, tools: Arc<dyn ToolPort>) -> Self {
+    pub(crate) fn new(runtime: Arc<dyn AgentRuntime>, tools: Arc<dyn ToolPort>) -> Self {
         Self { runtime, tools, store: None, tape: None, events: None, system_prompt_override: None }
     }
 
     /// Attach a session store for slash commands that inspect persisted state.
     #[must_use]
-    pub fn with_store(mut self, store: Arc<dyn SessionStore>) -> Self {
+    pub(crate) fn with_store(mut self, store: Arc<dyn SessionStore>) -> Self {
         self.store = Some(store);
         self
     }
 
     /// Attach a tape store for persistent conversation recording.
     #[must_use]
-    pub fn with_tape(mut self, tape: Arc<dyn bob_core::ports::TapeStorePort>) -> Self {
+    pub(crate) fn with_tape(mut self, tape: Arc<dyn bob_core::ports::TapeStorePort>) -> Self {
         self.tape = Some(tape);
         self
     }
 
     /// Attach an event sink for observability.
     #[must_use]
-    pub fn with_events(mut self, events: Arc<dyn EventSink>) -> Self {
+    pub(crate) fn with_events(mut self, events: Arc<dyn EventSink>) -> Self {
         self.events = Some(events);
         self
     }
@@ -114,7 +114,7 @@ impl AgentLoop {
     /// at the composition root. The content is passed as a pre-loaded string to
     /// keep the runtime free from filesystem dependencies.
     #[must_use]
-    pub fn with_system_prompt(mut self, prompt: String) -> Self {
+    pub(crate) fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt_override = Some(prompt);
         self
     }
@@ -123,7 +123,8 @@ impl AgentLoop {
     ///
     /// Slash commands are handled deterministically. Natural language input
     /// is forwarded to the LLM pipeline.
-    pub async fn handle_input(
+    #[cfg_attr(not(test), expect(dead_code, reason = "test convenience wrapper"))]
+    pub(crate) async fn handle_input(
         &self,
         input: &str,
         session_id: &str,
@@ -132,7 +133,7 @@ impl AgentLoop {
     }
 
     /// Process a single user input using an explicit request context.
-    pub async fn handle_input_with_context(
+    pub(crate) async fn handle_input_with_context(
         &self,
         input: &str,
         session_id: &str,
