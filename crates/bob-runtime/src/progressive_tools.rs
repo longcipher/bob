@@ -123,7 +123,6 @@ impl ProgressiveToolView {
     pub(crate) fn activated_tools(&self) -> Vec<ToolDescriptor> {
         self.all_tools.iter().filter(|t| self.activated.contains(&t.id)).cloned().collect()
     }
-
 }
 
 // ── Tests ────────────────────────────────────────────────────────────

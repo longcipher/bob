@@ -28,7 +28,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 async-stream = { workspace = true }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
 
 [lints]
 workspace = true

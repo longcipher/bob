@@ -121,3 +121,94 @@ mod tests {
         assert!(is_tool_allowed("local/read_file", &deny, Some(&allow)));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        #[test]
+        fn tools_match_is_reflexive(tool in "[a-z_/]{1,30}") {
+            prop_assert!(tools_match(&tool, &tool));
+        }
+
+        #[test]
+        fn tools_match_is_symmetric(a in "[a-z_/]{1,30}", b in "[a-z_/]{1,30}") {
+            prop_assert_eq!(tools_match(&a, &b), tools_match(&b, &a));
+        }
+
+        #[test]
+        fn tools_match_is_case_insensitive_prop(tool in "[a-z_/]{1,30}") {
+            let upper = tool.to_uppercase();
+            prop_assert!(tools_match(&tool, &upper));
+        }
+
+        #[test]
+        fn normalize_tool_list_never_contains_empty(tools in prop::collection::vec("[a-z_]{0,20}", 0..20)) {
+            let normalized = normalize_tool_list(tools.iter().map(String::as_str));
+            prop_assert!(!normalized.iter().any(String::is_empty));
+        }
+
+        #[test]
+        fn normalize_tool_list_deduplicates(tools in prop::collection::vec("[a-z_]{1,10}", 0..20)) {
+            let normalized = normalize_tool_list(tools.iter().map(String::as_str));
+            // Check that no two elements match
+            for i in 0..normalized.len() {
+                for j in (i+1)..normalized.len() {
+                    prop_assert!(!tools_match(&normalized[i], &normalized[j]),
+                        "found duplicates: {} and {}", normalized[i], normalized[j]);
+                }
+            }
+        }
+
+        #[test]
+        fn normalize_tool_list_is_sorted(tools in prop::collection::vec("[a-z_]{1,10}", 0..20)) {
+            let normalized = normalize_tool_list(tools.iter().map(String::as_str));
+            for window in normalized.windows(2) {
+                prop_assert!(tool_key(&window[0]) <= tool_key(&window[1]),
+                    "not sorted: {} > {}", window[0], window[1]);
+            }
+        }
+
+        #[test]
+        fn intersect_is_subset_of_lhs(lhs in prop::collection::vec("[a-z_]{1,10}", 0..10), rhs in prop::collection::vec("[a-z_]{1,10}", 0..10)) {
+            let result = intersect_allowlists(&lhs, &rhs);
+            for item in &result {
+                prop_assert!(lhs.iter().any(|l| tools_match(l, item)),
+                    "result item {} not in lhs", item);
+            }
+        }
+
+        #[test]
+        fn intersect_is_subset_of_rhs(lhs in prop::collection::vec("[a-z_]{1,10}", 0..10), rhs in prop::collection::vec("[a-z_]{1,10}", 0..10)) {
+            let result = intersect_allowlists(&lhs, &rhs);
+            for item in &result {
+                prop_assert!(rhs.iter().any(|r| tools_match(r, item)),
+                    "result item {} not in rhs", item);
+            }
+        }
+
+        #[test]
+        fn is_tool_allowed_deny_overrides_allow(tool in "[a-z_]{1,10}") {
+            let deny = vec![tool.clone()];
+            let allow = vec![tool.clone()];
+            prop_assert!(!is_tool_allowed(&tool, &deny, Some(&allow)));
+        }
+
+        #[test]
+        fn is_tool_allowed_no_allow_list_allows(tool in "[a-z_]{1,10}") {
+            let deny: Vec<String> = vec![];
+            prop_assert!(is_tool_allowed(&tool, &deny, None));
+        }
+
+        #[test]
+        fn merge_both_none_returns_none(a in prop::option::of(prop::collection::vec("[a-z_]{1,10}", 0..5)), b in prop::option::of(prop::collection::vec("[a-z_]{1,10}", 0..5))) {
+            // Only test when both are None
+            if a.is_none() && b.is_none() {
+                prop_assert!(merge_allowlists(None, None).is_none());
+            }
+        }
+    }
+}

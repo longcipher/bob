@@ -91,6 +91,24 @@ impl AgentError {
             Self::Internal(_) => "BOB_INTERNAL",
         }
     }
+
+    /// Create a policy violation error with tool context.
+    #[must_use]
+    pub fn policy(tool_name: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::Policy(format!("tool '{}' denied: {}", tool_name.into(), reason.into()))
+    }
+
+    /// Create a configuration error with key context.
+    #[must_use]
+    pub fn config(key: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Config(format!("{}: {}", key.into(), message.into()))
+    }
+
+    /// Create a conflict error with resource context.
+    #[must_use]
+    pub fn conflict(resource: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::Conflict(format!("{}: {}", resource.into(), detail.into()))
+    }
 }
 
 /// LLM adapter errors.
@@ -124,6 +142,18 @@ impl LlmError {
             Self::Other(_) => "BOB_LLM_OTHER",
         }
     }
+
+    /// Create a provider error with model context.
+    #[must_use]
+    pub fn provider(model: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Provider(format!("{}: {}", model.into(), message.into()))
+    }
+
+    /// Create a stream error with context.
+    #[must_use]
+    pub fn stream(message: impl Into<String>) -> Self {
+        Self::Stream(message.into())
+    }
 }
 
 /// Tool execution errors.
@@ -152,6 +182,12 @@ impl ToolError {
             Self::Timeout { .. } => "BOB_TOOL_TIMEOUT",
             Self::Other(_) => "BOB_TOOL_OTHER",
         }
+    }
+
+    /// Create an execution error with tool name context.
+    #[must_use]
+    pub fn execution(tool_name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Execution(format!("{}: {}", tool_name.into(), message.into()))
     }
 }
 
@@ -182,6 +218,12 @@ impl StoreError {
             Self::Other(_) => "BOB_STORE_OTHER",
         }
     }
+
+    /// Create a backend error with store type context.
+    #[must_use]
+    pub fn backend(store_type: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Backend(format!("{}: {}", store_type.into(), message.into()))
+    }
 }
 
 /// Cost meter errors.
@@ -206,6 +248,12 @@ impl CostError {
             Self::Backend(_) => "BOB_COST_BACKEND",
             Self::Other(_) => "BOB_COST_OTHER",
         }
+    }
+
+    /// Create a budget exceeded error with budget context.
+    #[must_use]
+    pub fn budget_exceeded(budget_name: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::BudgetExceeded(format!("{}: {}", budget_name.into(), detail.into()))
     }
 }
 

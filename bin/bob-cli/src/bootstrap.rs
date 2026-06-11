@@ -40,7 +40,6 @@ pub(crate) struct CliRuntimeHandles {
     pub tools: Arc<dyn bob_adapters::core::ports::ToolPort>,
     pub store: Arc<dyn bob_adapters::core::ports::SessionStore>,
     pub tape: Arc<dyn bob_adapters::core::ports::TapeStorePort>,
-    #[expect(dead_code)]
     pub skills_context: Option<SkillsRuntimeContext>,
 }
 
@@ -49,7 +48,9 @@ pub(crate) async fn build_runtime(cfg: &AgentConfig) -> eyre::Result<CliRuntimeH
     let api_key = std::env::var("OPENAI_API_KEY")
         .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
         .or_else(|_| std::env::var("GEMINI_API_KEY"))
-        .unwrap_or_default();
+        .wrap_err(
+            "no LLM API key found; set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY",
+        )?;
     let config = liter_llm::ClientConfig::new(api_key);
     let client = std::sync::Arc::new(
         liter_llm::DefaultClient::new(config, Some(&cfg.runtime.default_model))

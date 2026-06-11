@@ -21,7 +21,7 @@ use clap::{Parser, Subcommand};
 use eyre::WrapErr;
 
 use crate::{
-    bootstrap::{CliRuntimeHandles, build_runtime},
+    bootstrap::{CliRuntimeHandles, SkillsRuntimeContext, build_runtime},
     config::AgentConfig,
 };
 
@@ -155,8 +155,8 @@ Available slash commands:
 }
 
 /// Build an Agent from configuration.
-async fn build_agent(cfg: &AgentConfig) -> eyre::Result<Agent> {
-    let CliRuntimeHandles { runtime, tools, store, tape, skills_context: _ } =
+async fn build_agent(cfg: &AgentConfig) -> eyre::Result<(Agent, Option<SkillsRuntimeContext>)> {
+    let CliRuntimeHandles { runtime, tools, store, tape, skills_context } =
         build_runtime(cfg).await?;
 
     let mut builder = Agent::from_runtime(runtime, tools).with_store(store).with_tape(tape);
@@ -166,7 +166,7 @@ async fn build_agent(cfg: &AgentConfig) -> eyre::Result<Agent> {
         builder = builder.with_system_prompt(prompt);
     }
 
-    Ok(builder.build())
+    Ok((builder.build(), skills_context))
 }
 
 /// Run the interactive REPL loop.
@@ -175,13 +175,16 @@ async fn build_agent(cfg: &AgentConfig) -> eyre::Result<Agent> {
     clippy::print_stderr,
     reason = "CLI REPL must use stdout/stderr for user interaction"
 )]
-async fn repl(mut session: Session, model: &str, cfg: &AgentConfig) {
+async fn repl(
+    mut session: Session,
+    model: &str,
+    cfg: &AgentConfig,
+    skills_context: Option<SkillsRuntimeContext>,
+) {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
-
-    let skills_context = bootstrap::build_skills_composer(cfg).ok().flatten();
 
     eprintln!("Bob agent ready  (model: {model})");
     eprintln!("Session: {}", session.session_id());
@@ -608,10 +611,10 @@ async fn main() -> eyre::Result<()> {
                 .wrap_err_with(|| format!("failed to load config from '{}'", cli.config))?;
 
             // Build agent using the new simplified API
-            let agent = build_agent(&cfg).await?;
+            let (agent, skills_context) = build_agent(&cfg).await?;
             let session = agent.start_session();
 
-            repl(session, &cfg.runtime.default_model, &cfg).await;
+            repl(session, &cfg.runtime.default_model, &cfg, skills_context).await;
         }
         Commands::Skills(skills_cmd) => match skills_cmd {
             SkillsCommands::List {

@@ -44,7 +44,6 @@ use std::sync::Arc;
 use bob_core::{
     error::AgentError,
     journal::{JournalEntry, ToolJournalPort},
-    normalize_tool_list,
     ports::{
         ApprovalPort, ArtifactStorePort, ContextCompactorPort, CostMeterPort, EventSink, LlmPort,
         SessionStore, ToolPolicyPort, ToolPort, TurnCheckpointStorePort,
@@ -52,7 +51,8 @@ use bob_core::{
     types::{
         AgentAction, AgentEvent, AgentEventStream, AgentRequest, AgentResponse, AgentRunResult,
         AgentStreamEvent, ApprovalContext, ApprovalDecision, ArtifactRecord, FinishReason,
-        GuardReason, Message, Role, TokenUsage, ToolCall, ToolResult, TurnCheckpoint, TurnPolicy,
+        GuardReason, Message, Role, TokenUsage, ToolCall, ToolCallPolicy, ToolResult,
+        TurnCheckpoint, TurnPolicy,
     },
 };
 use futures_util::StreamExt;
@@ -169,22 +169,8 @@ fn resolve_selected_skills(req: &AgentRequest) -> Vec<String> {
     req.context.selected_skills.clone()
 }
 
-#[derive(Debug, Clone, Default)]
-struct ToolCallPolicy {
-    deny_tools: Vec<String>,
-    allow_tools: Option<Vec<String>>,
-}
-
 fn resolve_tool_call_policy(req: &AgentRequest) -> ToolCallPolicy {
-    let deny_tools =
-        normalize_tool_list(req.context.tool_policy.deny_tools.iter().map(String::as_str));
-    let allow_tools = req
-        .context
-        .tool_policy
-        .allow_tools
-        .as_ref()
-        .map(|tools| normalize_tool_list(tools.iter().map(String::as_str)));
-    ToolCallPolicy { deny_tools, allow_tools }
+    req.context.tool_policy.resolve()
 }
 
 fn prompt_options_for_mode(

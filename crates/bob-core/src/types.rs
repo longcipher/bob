@@ -114,6 +114,33 @@ pub struct RequestToolPolicy {
     pub allow_tools: Option<Vec<String>>,
 }
 
+/// Resolved and normalized tool call policy for runtime evaluation.
+///
+/// This is the processed form of [`RequestToolPolicy`] with normalized
+/// tool lists, ready for use in tool-call evaluation.
+#[derive(Debug, Clone, Default)]
+pub struct ToolCallPolicy {
+    /// Normalized deny list.
+    pub deny_tools: Vec<String>,
+    /// Normalized allow list. `None` means "allow all not denied".
+    pub allow_tools: Option<Vec<String>>,
+}
+
+impl RequestToolPolicy {
+    /// Resolve this policy into a normalized [`ToolCallPolicy`].
+    #[must_use]
+    pub fn resolve(&self) -> ToolCallPolicy {
+        use crate::tool_policy::normalize_tool_list;
+
+        let deny_tools = normalize_tool_list(self.deny_tools.iter().map(String::as_str));
+        let allow_tools = self
+            .allow_tools
+            .as_ref()
+            .map(|tools| normalize_tool_list(tools.iter().map(String::as_str)));
+        ToolCallPolicy { deny_tools, allow_tools }
+    }
+}
+
 /// Final agent output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentResponse {

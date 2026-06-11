@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
+proptest = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 
 [lints]
